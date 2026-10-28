@@ -41,6 +41,7 @@ import {
   notifyLabel,
 } from "./prompt.js";
 import { StoreError, type ScheduleStore } from "./store.js";
+import { routingError } from "./routing.js";
 import type {
   FireSource,
   JobAction,
@@ -116,6 +117,11 @@ export interface RunnerOptions {
   hasInitialPrompt?: () => boolean;
   now?: () => Date;
   tickMs?: number;
+  background?: boolean;
+  signal?: AbortSignal;
+  /** Project job files must be explicitly admitted by the worker operator. */
+  backgroundProjects?: readonly string[];
+  runPrompt?: (body: string, job: ScheduledJob, runId: string) => Promise<string>;
   /** Delivery wait budget for in-flight compaction (default {@link COMPACTION_WAIT_MAX_MS}). */
   compactionWaitMs?: number;
   /** Poll interval for the compaction wait (default {@link COMPACTION_POLL_MS}). */
@@ -124,7 +130,10 @@ export interface RunnerOptions {
   compactionProbeMs?: number;
 }
 
+class DeliveryCancelled extends Error {}
+
 export class ScheduleRunner {
+  private sessionEpoch = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cwd = process.cwd();
   private waveActive = false;
@@ -164,6 +173,7 @@ export class ScheduleRunner {
     this.privilege.attach(pi);
 
     pi.on("session_start", async (event, ctx) => {
+      this.sessionEpoch += 1;
       this.cwd = ctx.cwd;
       this.stopTicker();
       this.compacting = false; // fresh session cannot be mid-compaction
@@ -191,6 +201,7 @@ export class ScheduleRunner {
     });
 
     pi.on("session_shutdown", () => {
+      this.sessionEpoch += 1;
       this.stopTicker();
       this.privilege.clear();
       this.compacting = false;
@@ -206,8 +217,9 @@ export class ScheduleRunner {
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
   ): Promise<ScheduledJob[]> {
+    const epoch = this.sessionEpoch;
     if (meta.source === "run_now") {
-      const result = this.waveChain.then(() => this.runWave(ctx, meta));
+      const result = this.waveChain.then(() => epoch === this.sessionEpoch ? this.runWave(ctx, meta) : []);
       this.waveChain = result.then(
         () => undefined,
         () => undefined,
@@ -225,8 +237,10 @@ export class ScheduleRunner {
   ): Promise<ScheduledJob[]> {
     if (this.waveActive && meta.source !== "run_now") return [];
     this.waveActive = true;
+    const epoch = this.sessionEpoch;
 
     try {
+      this.cwd = ctx.cwd;
       const now = this.now();
       let candidates: ScheduledJob[];
 
@@ -241,6 +255,7 @@ export class ScheduleRunner {
         candidates = this.opts.store.dueJobs(this.cwd, now);
       }
 
+      candidates = candidates.filter((job) => !this.routeError(job, ctx));
       if (candidates.length === 0) return [];
 
       const maxFires =
@@ -254,6 +269,7 @@ export class ScheduleRunner {
       let attempts = 0; // ok + error count toward cap
 
       for (const job of candidates) {
+        if (this.opts.signal?.aborted || epoch !== this.sessionEpoch) break;
         const forced = meta.source === "run_now";
         const result = await this.processOne(ctx, job, {
           source: meta.source,
@@ -271,7 +287,7 @@ export class ScheduleRunner {
 
       return updated;
     } catch (err) {
-      if (meta.source === "run_now") throw err;
+      if (meta.source === "run_now" || this.opts.background) throw err;
       if (err instanceof StoreError) {
         this.emitError(ctx, `store error: ${err.message}`, `store:${err.message}`);
         return [];
@@ -282,6 +298,13 @@ export class ScheduleRunner {
     } finally {
       this.waveActive = false;
     }
+  }
+
+  private routeError(job: ScheduledJob, ctx: ExtensionContext): string | undefined {
+    if (this.opts.background && job.scope === "project" && !this.opts.backgroundProjects?.includes(ctx.cwd)) {
+      return "Project not admitted to background execution";
+    }
+    return routingError(job, ctx.sessionManager?.getSessionId(), ctx.cwd, this.opts.background);
   }
 
   private emitError(ctx: ExtensionContext, detail: string, key: string): void {
@@ -355,11 +378,13 @@ export class ScheduleRunner {
     body: string,
     ctx: ExtensionContext,
     deliverAs?: "followUp" | "steer",
+    assertCurrent?: () => void,
   ): Promise<void> {
     const deadline = Date.now() + this.compactionWaitMs;
 
     for (;;) {
       try {
+        assertCurrent?.();
         this.sendNow(body, ctx, deliverAs);
         this.compacting = false; // flag can go stale (cancelled compaction)
         return;
@@ -390,7 +415,9 @@ export class ScheduleRunner {
       forced: boolean;
       deliverAs?: "followUp" | "steer";
     },
+    assertCurrent: () => void,
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
+    assertCurrent();
     const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
 
     if (action === "notify") {
@@ -431,7 +458,7 @@ export class ScheduleRunner {
     }
 
     if (action === "shell") {
-      return this.deliverShell(ctx, job, opts);
+      return this.deliverShell(ctx, job, opts, assertCurrent);
     }
 
     // prompt (default)
@@ -441,7 +468,12 @@ export class ScheduleRunner {
       source: opts.source,
       forced: opts.forced,
     });
-    await this.sendAgentMessage(body, ctx, opts.deliverAs);
+    if (this.opts.background) {
+      if (!this.opts.runPrompt) throw new Error("Background prompt executor unavailable");
+      const detail = await this.opts.runPrompt(body, job, opts.runId);
+      return { detail, wokeAgent: false };
+    }
+    await this.sendAgentMessage(body, ctx, opts.deliverAs, assertCurrent);
     return { detail: "prompt", wokeAgent: true };
   }
 
@@ -454,16 +486,14 @@ export class ScheduleRunner {
       forced: boolean;
       deliverAs?: "followUp" | "steer";
     },
+    assertCurrent: () => void,
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const command = job.command?.trim();
     if (!command) {
       throw new Error(`shell job "${job.name}" has no command`);
     }
 
-    // Global jobs have no projectPath, so they run in the session cwd — a
-    // relative command is therefore session-dependent. Prefer absolute
-    // commands or a project-scoped job for a deterministic cwd.
-    const cwd = job.projectPath ?? ctx.cwd ?? this.cwd;
+    const cwd = job.executionCwd ?? ctx.cwd;
     const timeoutMs = job.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
 
     if (ctx.hasUI) {
@@ -489,6 +519,7 @@ export class ScheduleRunner {
       stderr: truncateOutput(execResult.stderr),
     };
 
+    assertCurrent();
     this.opts.pi.sendMessage?.(
       {
         customType: "pi-schedule",
@@ -500,6 +531,7 @@ export class ScheduleRunner {
     );
 
     let wokeAgent = false;
+    let backgroundDetail = "";
     if (shouldWakeForShell(job, lastShell)) {
       const instruction = selectShellFollowUp(job, lastShell);
       if (instruction) {
@@ -511,12 +543,17 @@ export class ScheduleRunner {
           result: lastShell,
           instruction,
         });
-        await this.sendAgentMessage(body, ctx, opts.deliverAs);
-        wokeAgent = true;
+        if (this.opts.background) {
+          if (!this.opts.runPrompt) throw new Error("Background prompt executor unavailable");
+          backgroundDetail = await this.opts.runPrompt(body, job, opts.runId);
+        } else {
+          await this.sendAgentMessage(body, ctx, opts.deliverAs, assertCurrent);
+          wokeAgent = true;
+        }
       }
     }
 
-    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}`;
+    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}${backgroundDetail ? ` ${backgroundDetail}` : ""}`;
     return { detail, wokeAgent, lastShell };
   }
 
@@ -530,6 +567,12 @@ export class ScheduleRunner {
       allowFire: boolean;
     },
   ): Promise<ScheduledJob | null> {
+    const epoch = this.sessionEpoch;
+    const assertCurrent = () => {
+      if (epoch !== this.sessionEpoch || this.routeError(job, ctx)) {
+        throw new DeliveryCancelled("Scheduled delivery cancelled: owning session changed during execution");
+      }
+    };
     const at = this.now();
     const startedAt = at.toISOString();
     const runId = newRunId();
@@ -606,7 +649,8 @@ export class ScheduleRunner {
 
     try {
       // Re-check after lock (check-then-act fix).
-      const fresh = this.opts.store.get(job.id, this.cwd) ?? job;
+      const fresh = this.opts.store.get(job.id, ctx.cwd);
+      if (!fresh || (!opts.forced && !fresh.enabled) || fresh.terminated || this.routeError(fresh, ctx)) return null;
       const freshKey = opts.forced ? key : idempotencyKeyFor(fresh);
       const freshAction: JobAction = fresh.action ?? DEFAULT_JOB_ACTION;
       if (!opts.forced && this.alreadyDelivered(fresh, freshKey)) {
@@ -638,7 +682,8 @@ export class ScheduleRunner {
         source: opts.source,
         forced: opts.forced,
         deliverAs: opts.deliverAs,
-      });
+      }, assertCurrent);
+      assertCurrent();
 
       // Structural tier enforcement only when an agent turn was started.
       if (delivery.wokeAgent) {
@@ -675,7 +720,7 @@ export class ScheduleRunner {
       return finalJob;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (ctx.hasUI) {
+      if (ctx.hasUI && !(err instanceof DeliveryCancelled)) {
         ctx.ui.notify(
           `[pi-schedule] failed to fire "${job.name}": ${message}`,
           "error",
@@ -688,7 +733,8 @@ export class ScheduleRunner {
       // between the candidate-read and the fire is reflected in both the
       // advance and the forensic ledger (the success path already uses
       // `fresh`).
-      const errorSubject = this.opts.store.get(job.id, this.cwd) ?? job;
+      const errorSubject = this.opts.store.get(job.id, ctx.cwd);
+      if (!errorSubject) return null;
       const errorKey = opts.forced ? key : idempotencyKeyFor(errorSubject);
       const updated = this.opts.store.markAttempt(errorSubject, at, "error", {
         error: message,

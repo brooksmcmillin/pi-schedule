@@ -20,6 +20,11 @@ export default function piScheduleExtension(pi: ExtensionAPI): void {
   const ledger = new RunLedger(paths.runsFile);
   const locks = new JobLockManager(paths.lockDir);
   const privilege = new PrivilegeGuard();
+  if (process.env["PI_SCHEDULE_WORKER_CHILD"] === "1") {
+    // The worker guard is loaded explicitly by the worker. Never start a
+    // second due-job scanner inside a scheduled child.
+    return;
+  }
   const runner = new ScheduleRunner({ store, pi, ledger, locks, privilege });
 
   runner.attach();

@@ -54,7 +54,7 @@ function setup() {
       params: Record<string, unknown>,
       signal: unknown,
       onUpdate: unknown,
-      ctx: { cwd: string },
+      ctx: { cwd: string; sessionManager: { getSessionId: () => string } },
     ) => Promise<{ content: Array<{ type: string; text: string }> }>;
   } | null = null;
   const pi = {
@@ -66,7 +66,7 @@ function setup() {
   registerScheduleTool(pi, store, runner, ledger);
 
   const exec = (params: Record<string, unknown>) =>
-    tool!.execute("t1", params, undefined, undefined, { cwd: project });
+    tool!.execute("t1", params, undefined, undefined, { cwd: project, sessionManager: { getSessionId: () => "session-a" } });
 
   /** Create a job then overwrite fields (lastStatus etc.) for status tests. */
   const seed = (
@@ -77,6 +77,9 @@ function setup() {
       prompt: "p",
       schedule: parseSchedule("every 1h"),
       scope: "global",
+      target: "session",
+      ownerSessionId: "session-a",
+      executionCwd: project,
     });
     const merged = { ...store.get(created.id, project)!, ...over };
     store.upsert(merged);
@@ -473,6 +476,31 @@ describe("schedule tool — misc branches", () => {
     expect(
       text(await s.exec({ action: "history", id: j.id }) as any),
     ).toContain("Run history"); // no limit → default 10
+  });
+});
+
+describe("schedule tool — routing", () => {
+  it("captures the session and cwd by default, even for global storage", async () => {
+    const s = setup();
+    await s.exec({ action: "create", name: "follow-up", prompt: "continue", once: "20m", scope: "global" });
+    expect(s.store.listForCwd(s.project)[0]).toMatchObject({ target: "session", ownerSessionId: "session-a", executionCwd: s.project });
+  });
+
+  it("requires an explicit background target and does not capture session authority", async () => {
+    const s = setup();
+    await s.exec({ action: "create", name: "review", prompt: "review", every: "1d", target: "background" });
+    expect(s.store.listForCwd(s.project)[0]).toMatchObject({ target: "background", scope: "global", executionCwd: s.project });
+    expect(s.store.listForCwd(s.project)[0]?.ownerSessionId).toBeUndefined();
+  });
+
+  it("refuses run_now for foreign owners and background jobs", async () => {
+    const s = setup();
+    for (const over of [{ ownerSessionId: "session-b" }, { target: "background" as const }]) {
+      const job = s.seed(over);
+      s.setRunNowResult([{ ...job, lastStatus: "ok" }]);
+      expect(text(await s.exec({ action: "run_now", id: job.id }))).toContain("Did not fire");
+      expect(s.store.get(job.id, s.project)?.runCount).toBe(0);
+    }
   });
 });
 

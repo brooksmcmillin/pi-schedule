@@ -56,6 +56,8 @@ function makeHarness(opts: HarnessOpts = {}) {
   const paths = defaultPaths(home);
 
   const store = new ScheduleStore(paths);
+  const create = store.create.bind(store);
+  store.create = (input) => create({ target: "session", ownerSessionId: "session-a", executionCwd: project, ...input });
   const ledger = new RunLedger(paths.runsFile);
   const locks = new JobLockManager(paths.lockDir);
   const privilege = new PrivilegeGuard();
@@ -124,6 +126,7 @@ function makeHarness(opts: HarnessOpts = {}) {
 
   const ctx = {
     cwd: project,
+    sessionManager: { getSessionId: () => "session-a" },
     hasUI: opts.hasUI ?? true,
     isIdle: () => idle,
     ui: { notify: (m: string) => notifies.push(m) },
@@ -960,5 +963,108 @@ describe("ScheduleRunner — compaction busy-wait", () => {
     expect(h.sent).toHaveLength(1);
     const after = h.store.get(job.id, h.project)!;
     expect(after.lastStatus).toBe("ok");
+  });
+});
+
+describe("execution routing", () => {
+  it("cancels the rest of a wave and queued run_now across a reload", async () => {
+    const h = makeHarness({ sendCompactionBusyTimes: 1 });
+    h.runner.attach();
+    const first = h.createGlobal("first");
+    const second = h.createGlobal("second");
+    h.forceDue(first.id);
+    h.forceDue(second.id);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const active = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [first.id, second.id] });
+    await Promise.resolve(); // Start the first queued wave and park in compaction.
+    const queued = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [second.id] });
+    await h.emit("session_shutdown", {});
+    await Promise.all([active, queued]);
+    expect(h.sent).toEqual([]);
+    expect(h.store.get(second.id, h.project)?.runCount).toBe(0);
+    expect(h.store.get(second.id, h.project)?.nextRunAt).toBe(T0);
+    errors.mockRestore();
+  });
+  it("does not deliver shell results or followups after a session switch", async () => {
+    const h = makeHarness();
+    h.runner.attach();
+    const job = h.createGlobal("check", "mutate");
+    h.store.upsert({ ...job, action: "shell", command: "check", wakeOn: "always", prompt: "inspect" });
+    h.forceDue(job.id);
+    vi.spyOn(h.pi, "exec").mockImplementation(async () => {
+      await h.emit("session_shutdown", {});
+      return { code: 0, killed: false, stdout: "done", stderr: "" };
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+    expect(h.sent).toEqual([]);
+    expect(h.customMessages).toEqual([]);
+    expect(h.privilege.depth()).toBe(0);
+    expect(h.store.get(job.id, h.project)?.lastError).toContain("owning session changed");
+    errors.mockRestore();
+  });
+
+  it("cancels compaction retries when the session runtime is replaced", async () => {
+    const h = makeHarness({ sendCompactionBusyTimes: 1 });
+    h.runner.attach();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pending = h.runner.fireDue(h.ctx, { source: "tick" });
+    await h.emit("session_shutdown", {});
+    await pending;
+    expect(h.sent).toEqual([]);
+    expect(h.privilege.depth()).toBe(0);
+    expect(h.store.get(job.id, h.project)?.lastStatus).toBe("error");
+    errors.mockRestore();
+  });
+  it.each(["session_start", "tick", "run_now"] as const)("rejects foreign owners on %s without consuming the job", async (source) => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.store.upsert({ ...job, ownerSessionId: "session-b" });
+    h.forceDue(job.id);
+    const before = h.store.get(job.id, h.project);
+    expect(await h.runner.fireDue(h.ctx, { source, jobIds: source === "run_now" ? [job.id] : undefined })).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.store.get(job.id, h.project)).toEqual(before);
+    expect(h.ledger.history()).toEqual([]);
+  });
+
+  it.each([undefined, "background"] as const)("does not inject legacy or background target %s", async (target) => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.store.upsert({ ...job, target });
+    h.forceDue(job.id);
+    await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
+    expect(h.sent).toEqual([]);
+    expect(h.store.get(job.id, h.project)?.runCount).toBe(0);
+  });
+
+  it("resumes only in the owner session and original workspace", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    vi.spyOn(h.ctx.sessionManager, "getSessionId").mockReturnValue("session-b");
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.sent).toEqual([]);
+    vi.spyOn(h.ctx.sessionManager, "getSessionId").mockReturnValue("session-a");
+    await h.runner.fireDue({ ...h.ctx, cwd: h.root }, { source: "tick" });
+    expect(h.sent).toEqual([]);
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("rechecks ownership after acquiring the lock", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    const get = h.store.get.bind(h.store);
+    vi.spyOn(h.store, "get").mockImplementation((id, cwd) => {
+      const fresh = get(id, cwd);
+      return fresh ? { ...fresh, ownerSessionId: "session-b" } : undefined;
+    });
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+    expect(h.sent).toEqual([]);
+    expect(get(job.id, h.project)?.runCount).toBe(0);
   });
 });

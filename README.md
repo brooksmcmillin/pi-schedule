@@ -21,6 +21,22 @@ pi install ./pi-schedule
 pi -e ./src/extension.ts
 ```
 
+## Execution targets (fork)
+
+This fork defaults new jobs to `target=session`: the creator's session ID and
+workspace are captured automatically, including for globally stored jobs.
+They never fire in a different session. Use explicit `target=background` for
+independent work: a separate worker starts fresh headless Pi sessions, with
+results saved outside existing conversations.
+
+**Legacy jobs have no inferred owner and will not execute.** Recreate each
+with its intended target after checking authorization. Reload/restart every
+already-open Pi process to replace its old scheduler implementation.
+
+See [background worker setup and migration](docs/BACKGROUND.md).
+Install this fork with `pi install git:github.com/brooksmcmillin/pi-schedule@<ref>`,
+replacing—not supplementing—the upstream package entry.
+
 ## How it works
 
 | Piece | Behavior |
@@ -33,7 +49,8 @@ pi -e ./src/extension.ts
 | **Skip** | If pi was launched with an initial prompt (`pi "do X"`), due jobs are **not** checked or triggered for that start |
 | **Reliability** | Run ledger, single-flight locks, missed-window policy, privilege tiers, fire caps — see [docs/RELIABILITY.md](docs/RELIABILITY.md) |
 
-Storage is **daemon-ready**: each job tracks `nextRunAt` / `lastRunAt` so a future headless runner can share the same files.
+Storage is shared by the owner-session runner and the external background worker.
+The execution target, not the storage scope, determines which runner may fire.
 
 **Compatibility:** works on any pi ≥ 0.74. On pi ≥ 0.84.1, privilege blocks also
 *terminate* the scheduled turn early — a read-only/suggest job that attempts a
@@ -66,7 +83,8 @@ schedule
   maxRuns?:       max deliveries (ok+error) before auto-disable
   every?:         "30m" | "2h" | "1d"   (xor dailyAt/once)
   dailyAt?:       "09:00"               (xor every/once)
-  scope?:         "global" | "project"  (default: project if .pi exists)
+  target?:        "session" | "background" (default: session; owner captured)
+  scope?:         "global" | "project"  (storage only; background defaults global)
   missedWindow?:  "catch_up_one" | "skip"   (default catch_up_one)
   tier?:          "read_only" | "suggest" | "mutate"  (default read_only; shell→mutate)
   id?:            job id
@@ -99,14 +117,14 @@ A terminated job is disabled and excluded from due scans. `list` shows `[off/ter
 #  bash, which read_only blocks — use tier="mutate" for that.)
 schedule action=create name="security-review"
   prompt="Review the code under src/ for security issues (injection, auth bypass, exposed secrets). Summarize findings with file:line. If none, say 'No findings'."
-  dailyAt="09:00" scope="project" tier="read_only"
+  dailyAt="09:00" target="background" tier="read_only"
 
 # Direct shell poll — no agent turn on green; wake only on failure.
 schedule action=create name="ci-poll" kind="shell"
   command="gh run list --limit 1 --json conclusion -q '.[0].conclusion'"
   wakeOn="failure"
   failurePrompt="Latest CI run failed. Inspect logs and propose or apply fixes."
-  every="5m" missedWindow="skip"
+  every="5m" target="background" missedWindow="skip"
 
 # Human reminder (no model tokens).
 schedule action=create name="stretch" kind="notify"
@@ -120,12 +138,12 @@ schedule action=create name="break" kind="notify"
 schedule action=create name="deploy-watch" kind="shell"
   command="gh run list --limit 1 --json conclusion -q '.[0].conclusion'"
   wakeOn="failure" failurePrompt="Deploy failed — investigate."
-  every="5m" maxRuns=10 missedWindow="skip"
+  every="5m" target="background" maxRuns=10 missedWindow="skip"
 
 # Check package versions every day via an agent prompt that must use the shell.
 schedule action=create name="pkg-versions"
   prompt="Run `npm outdated` for prod dependencies. Report only meaningful updates as current→latest with a one-line rationale. If nothing meaningful, reply 'No findings'."
-  every="1d" tier="mutate" missedWindow="skip"
+  every="1d" target="background" tier="mutate" missedWindow="skip"
 
 # List / history / force / cancel
 schedule action=list
@@ -143,7 +161,8 @@ schedule action=cancel id=abc123def456
 5. **`run_now`**: attempts force delivery; tool reports **actual** status (`ok` / `locked` / `error`), never invents success.
 6. **Locks + ledger**: O_EXCL file lock + idempotency key; forensic trail in `~/.pi-schedule/runs.jsonl`.
 
-Fired jobs use an isolated prompt contract:
+Fired jobs use a labeled prompt contract. Session delivery retains the owner's
+conversation; only background delivery creates a fresh conversation:
 
 ```text
 [scheduled-task]
@@ -189,7 +208,7 @@ Summary of MVP mitigations:
 - action kinds: prompt / shell / notify / message (shell via `bash -lc`, optional `wakeOn`)
 - lifecycle: `once` one-shots + `maxRuns` bounded polling
 - no cron expressions yet
-- no background OS daemon (in-session only; storage is ready)
+- external worker via systemd user timer or cron; fresh headless sessions for background prompts
 - `delivered` = action executed (prompt injected / shell finished / notify shown), not “agent finished correctly”
 
 ## Dev

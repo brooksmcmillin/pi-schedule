@@ -337,14 +337,19 @@ export class ScheduleStore {
     return this.paths.projectFile(projectRoot);
   }
 
+  listGlobal(): ScheduledJob[] {
+    return readStoreFile(this.paths.globalFile).jobs.map((job) => ({ ...normalizeJob(job), scope: "global" }));
+  }
+
   listForCwd(cwd: string): ScheduledJob[] {
     const projectRoot = resolve(cwd);
-    const global = readStoreFile(this.paths.globalFile).jobs;
+    const global = this.listGlobal();
     const project = readStoreFile(this.paths.projectFile(projectRoot)).jobs;
     const projectFiltered = project.filter(
       (j) => !j.projectPath || resolve(j.projectPath) === projectRoot,
     );
-    return [...global, ...projectFiltered].map(normalizeJob);
+    // File provenance, not a row-supplied label, determines storage scope.
+    return [...global, ...projectFiltered.map((job) => ({ ...job, scope: "project" as const, projectPath: projectRoot }))].map(normalizeJob);
   }
 
   get(id: string, cwd: string): ScheduledJob | undefined {
@@ -361,6 +366,12 @@ export class ScheduleStore {
 
   create(input: CreateJobInput): ScheduledJob {
     const scope = input.scope;
+    if (input.target === "session" && !input.ownerSessionId?.trim()) {
+      throw new StoreError("Session jobs require an owner session ID");
+    }
+    if (input.target && !input.executionCwd) {
+      throw new StoreError("Targeted jobs require an explicit execution workspace");
+    }
     const projectRoot =
       scope === "project"
         ? resolve(input.projectPath ?? process.cwd())
@@ -380,6 +391,9 @@ export class ScheduleStore {
 
     const action = normalizeJobAction(input.action);
     const job: ScheduledJob = {
+      target: input.target,
+      ownerSessionId: input.target === "session" ? input.ownerSessionId : undefined,
+      executionCwd: input.executionCwd ? resolve(input.executionCwd) : undefined,
       id: newJobId(),
       name: input.name.trim(),
       prompt: (input.prompt ?? "").trim(),

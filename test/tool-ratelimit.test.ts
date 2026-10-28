@@ -35,7 +35,7 @@ describe("schedule tool — create rate limit (isolated)", () => {
         params: Record<string, unknown>,
         signal: unknown,
         onUpdate: unknown,
-        ctx: { cwd: string },
+        ctx: { cwd: string; sessionManager: { getSessionId: () => string } },
       ) => Promise<{
         content: Array<{ type: string; text: string }>;
         details?: Record<string, unknown>;
@@ -51,6 +51,7 @@ describe("schedule tool — create rate limit (isolated)", () => {
     const exec = (params: Record<string, unknown>) =>
       tool!.execute("t1", params, undefined, undefined, {
         cwd: join(root, "project"),
+        sessionManager: { getSessionId: () => "session-a" },
       });
 
     for (let i = 0; i < 10; i++) {

@@ -8,6 +8,7 @@
  */
 
 export type ScheduleScope = "global" | "project";
+export type ExecutionTarget = "session" | "background";
 
 /** Interval schedule: every N minutes / hours / days. */
 export interface IntervalSchedule {
@@ -99,6 +100,10 @@ export interface ShellRunResult {
 }
 
 export interface ScheduledJob {
+  /** Missing on legacy rows: visible, but never eligible for execution. */
+  target?: ExecutionTarget;
+  ownerSessionId?: string;
+  executionCwd?: string;
   id: string;
   name: string;
   /**
@@ -158,6 +163,9 @@ export interface ScheduleStoreFile {
 }
 
 export interface CreateJobInput {
+  target?: ExecutionTarget;
+  ownerSessionId?: string;
+  executionCwd?: string;
   name: string;
   /** Required for prompt/notify/message; optional follow-up for shell. */
   prompt?: string;

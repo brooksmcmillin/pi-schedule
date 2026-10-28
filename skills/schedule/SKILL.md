@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: 'Schedule recurring agent tasks and actions — POLLS (CI / build / deploy / test / PR status), periodic checks, security reviews, version checks, reminders, scans. Owns the `schedule` tool (create / list / cancel / run_now / history) AND the design choices: kind (prompt/shell/notify/message), every-vs-dailyAt, tier (read_only/suggest/mutate), wakeOn for shell, missed-window policy, project-vs-global scope, and how to write a self-contained prompt that survives as an isolated run. Use when the user wants to POLL, WATCH, or CHECK something repeatedly — "poll the CI/build/deploy/tests", "check every N minutes", "check periodically", "watch for", "watch the", "keep an eye on", "monitor", "ping me when", "alert me if", "tell me if X", "see if it is done yet", "wait until" — or says "every day", "hourly", "daily at", "schedule", "recurring", "periodic", "remind me", "cron", or wants automated / repeating agent work.'
+description: 'Schedule recurring agent tasks and actions — POLLS (CI / build / deploy / test / PR status), periodic checks, security reviews, version checks, reminders, scans. Owns the `schedule` tool (create / list / cancel / run_now / history) AND the design choices: kind (prompt/shell/notify/message), every-vs-dailyAt, tier (read_only/suggest/mutate), wakeOn for shell, missed-window policy, session-owned vs isolated background execution, project-vs-global storage scope, and how to write a self-contained prompt that survives as an isolated run. Use when the user wants to POLL, WATCH, or CHECK something repeatedly — "poll the CI/build/deploy/tests", "check every N minutes", "check periodically", "watch for", "watch the", "keep an eye on", "monitor", "ping me when", "alert me if", "tell me if X", "see if it is done yet", "wait until" — or says "every day", "hourly", "daily at", "schedule", "recurring", "periodic", "remind me", "cron", or wants automated / repeating agent work.'
 ---
 
 # Schedule — recurring agent tasks
@@ -10,16 +10,37 @@ The tool is purely mechanical (it stores and fires jobs). The *value* comes
 from choosing the parameters well and writing a prompt that still makes sense
 when it fires with zero chat context. That's what this file covers.
 
-## How firing works (read this first)
+## Choose the execution target first
+
+- **Current-task follow-up, claim keepalive, deferred continuation:** use
+  `schedule target="session"` (the default). Ownership and workspace are captured
+  from the creating session; no other session can run it, including `run_now`.
+  Never use background execution for authority held by a particular session.
+- **Independent recurring report, scan, or check:** use
+  `schedule target="background"` explicitly. The external worker launches a fresh
+  headless Pi process and saves its transcript/results outside interactive chats.
+  Confirm the worker timer is installed; see [background setup](../../docs/BACKGROUND.md).
+- **Existing alternative:** if `schedule_prompt` is available, it can make
+  session-bound reminders (`action=add,type=once,schedule="+20m"`). Verify the
+  returned job's `session` equals the current session; its configurable default
+  can be overridden. Do not set `model` for an owner-session continuation.
+- `scope=global/project` selects **storage only**, not execution routing.
+  A UUID written inside a prompt does not bind anything.
+- Legacy jobs without a target remain listed but cannot run. Recreate them from
+  their original owner after checking current authorization; never infer an
+  owner or transfer a claim to a background worker.
+
+## How firing works
 
 What fires depends on **`kind`**:
 - **prompt** — isolated agent turn (below)
 - **shell** — runs `command` first; agent turn only if `wakeOn` says so
 - **notify** / **message** — human-visible only; **no** agent turn
 
-For **prompt** (and shell wakes), the job is an **isolated turn** — a brand-new
-user message with **no prior conversation**. Pi injects a contract header, then
-your instruction:
+For **prompt** (and shell wakes), session-target jobs inject a message into the
+owning conversation; they do not erase its prior context. Background-target jobs
+start a fresh conversation, with normal workspace instructions and configured
+extensions. Pi injects a contract header, then your instruction:
 
 ```
 [scheduled-task]
@@ -47,7 +68,9 @@ Two consequences shape every decision below:
 
 Firing triggers: on **session start** when due (skipped if pi was launched
 with an initial prompt, e.g. `pi "fix the bug"`), and every **30s** while a
-session stays open and the agent is idle. There is **no background OS daemon**.
+owning session stays open and idle. Background jobs are scanned by the separate
+worker timer, not by interactive sessions. Closed owner sessions are never
+substituted; due jobs remain pending and follow missed-window policy on resume.
 
 ## The tool at a glance
 
@@ -65,7 +88,8 @@ schedule
   maxRuns       (create) cap deliveries (ok+error) before auto-disable
   every         (create) "30m" | "2h" | "1d"   (xor with dailyAt/once)
   dailyAt       (create) "09:00" local time   (xor with every/once)
-  scope         global | project              (default: project if .pi/ exists in cwd)
+  target        session | background          (default: session; owner captured automatically)
+  scope         global | project              (storage only; background defaults global)
   tier          read_only | suggest | mutate  (default read_only; shell forces mutate)
   missedWindow  catch_up_one | skip           (default catch_up_one)
   id            (cancel/enable/disable/run_now/history)
@@ -116,7 +140,10 @@ A job that reaches its end state is **terminated** (`once` → one fire; `maxRun
 Rule of thumb: **polls → `every`; reports/reviews → `dailyAt`.** `dailyAt` is
 local timezone and DST-safe.
 
-### `scope`
+### `scope` — storage, not execution
+
+Background jobs default to global storage with their creating workspace captured.
+Explicit project background jobs require worker admission with `--project /path`.
 
 - **project** (default when `.pi/` exists in cwd): tied to this repo. Use for
   anything repo-specific (security review, deps, tests). Launch pi from the
@@ -178,12 +205,12 @@ check the thing we talked about and tell me if it's still broken
 # Daily STATIC security review of auth code (no git → read_only is valid)
 schedule action=create name="security-review"
   prompt="Review the code under src/auth/ for security issues (injection, auth bypass, exposed secrets). Cite file:line. If none, reply 'No findings'. Do not modify anything."
-  dailyAt="09:00" scope="project" tier="read_only"
+  dailyAt="09:00" target="background" tier="read_only"
 
 # Daily scan for hardcoded secrets across src/ (read/search only)
 schedule action=create name="secret-scan"
   prompt="Search src/ for hardcoded secrets, API keys, passwords, and credentials. List each hit as path:line with the token redacted. If none, reply 'No findings'."
-  every="1d" tier="read_only" missedWindow="catch_up_one"
+  every="1d" target="background" tier="read_only" missedWindow="catch_up_one"
 ```
 
 **`kind=shell` — direct command, wake only when useful:**
@@ -194,14 +221,14 @@ schedule action=create name="ci-poll" kind="shell"
   command="gh run list --limit 1 --json conclusion -q '.[0].conclusion' | grep -vq failure"
   wakeOn="failure"
   failurePrompt="Latest CI run failed. Inspect jobs/logs and propose or apply fixes."
-  every="5m" missedWindow="skip"
+  every="5m" target="background" missedWindow="skip"
 
 # Run tests later and always review output
 schedule action=create name="test-pass" kind="shell"
   command="npm test"
   wakeOn="always"
   prompt="Review this test output. If failed, fix; if passed, summarize."
-  every="1d"
+  every="1d" target="background"
 ```
 
 **`kind=notify` — human reminder, zero agent tokens:**
@@ -217,12 +244,12 @@ schedule action=create name="stretch" kind="notify"
 # Daily dependency check — agent runs `npm outdated`, so tier=mutate
 schedule action=create name="pkg-outdated"
   prompt="Run `npm outdated` for prod deps. Report meaningful updates as current→latest with a one-line rationale. If nothing meaningful, reply 'No findings'."
-  every="1d" tier="mutate" missedWindow="skip"
+  every="1d" target="background" tier="mutate" missedWindow="skip"
 
 # Morning standup prep — reads git log, so tier=mutate
 schedule action=create name="standup-prep"
   prompt="Read recent git log (last ~2 days) and draft 3 standup bullets: done, next, blockers. One line each."
-  dailyAt="09:15" scope="global" tier="mutate"
+  dailyAt="09:15" target="background" tier="mutate"
 ```
 
 ## Guardrails & verification
@@ -231,9 +258,12 @@ schedule action=create name="standup-prep"
   session start, 3 per tick. Creating a tight loop (e.g. `every 1m`) will spam
   the session — don't.
 - **Verify a job works before trusting it:**
-  - `schedule action=run_now id=<id>` — fires once immediately and reports the
+  - `schedule action=run_now id=<id>` — session jobs only, in their owner; reports the
     **actual** status (`ok` / `locked` / `error` / `skipped`), never fake success.
-  - `schedule action=history id=<id>` — append-only forensic trail of past runs.
+  - Background manual run: `npm run worker -- --job <id>` from the package directory
+    (add `--project /path` only for an explicitly trusted project job).
+  - `schedule action=history id=<id>` — append-only forensic trail; worker details link
+    logs and `result.json`. A completed process is not proof of task correctness.
   - `schedule action=list` — current jobs, next/last run, run count, last status.
 - **Privilege failures are silent-ish.** If a `read_only` job tries to run
   `bash`, the call is blocked and the run likely errors. Check `history` if a
