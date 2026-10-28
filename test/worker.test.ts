@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -123,6 +125,17 @@ describe("background worker", () => {
     const f = fixture();
     expect(await runProcess(process.execPath, ["-e", "process.stdout.write('isolated')"], { cwd: f.cwd, timeoutMs: 1_000 })).toMatchObject({ code: 0, stdout: "isolated", killed: false });
     expect(await runProcess(process.execPath, ["-e", "setInterval(()=>{},1000)"], { cwd: f.cwd, timeoutMs: 50 })).toMatchObject({ killed: true });
+  });
+
+  it("runs standalone without Pi's host-provided peer packages", async () => {
+    const f = fixture();
+    const source = join(f.root, "standalone");
+    cpSync(fileURLToPath(new URL("../src", import.meta.url)), source, { recursive: true });
+    writeFileSync(join(f.root, "package.json"), '{"type":"module"}');
+    const result = await runProcess(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), join(source, "worker.ts")], {
+      cwd: f.root, env: { ...process.env, HOME: f.root }, timeoutMs: 5_000,
+    });
+    expect(result, result.stderr).toMatchObject({ code: 0, stdout: "[]\n" });
   });
 
   it("enforces the tier in children without starting another schedule scanner", async () => {

@@ -24,7 +24,6 @@ import {
   terminalReason,
   truncateOutput,
 } from "./action.js";
-import { shouldSkipDueOnSessionStart } from "./cli-prompt.js";
 import { RunLedger, buildRun, newRunId } from "./ledger.js";
 import { JobLockManager } from "./lock.js";
 import {
@@ -179,7 +178,7 @@ export class ScheduleRunner {
       this.compacting = false; // fresh session cannot be mid-compaction
 
       if (FIRE_ON_REASONS.has(event.reason)) {
-        if (shouldSkipDueOnSessionStart(event.reason, this.hasInitialPrompt)) {
+        if (event.reason === "startup" && this.hasInitialPrompt?.()) {
           this.startTicker(ctx);
           return;
         }

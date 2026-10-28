@@ -8,6 +8,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { RunLedger } from "./ledger.js";
+import { hasCliInitialPrompt } from "./cli-prompt.js";
 import { JobLockManager } from "./lock.js";
 import { PrivilegeGuard } from "./privilege.js";
 import { ScheduleRunner } from "./runner.js";
@@ -25,7 +26,7 @@ export default function piScheduleExtension(pi: ExtensionAPI): void {
     // second due-job scanner inside a scheduled child.
     return;
   }
-  const runner = new ScheduleRunner({ store, pi, ledger, locks, privilege });
+  const runner = new ScheduleRunner({ store, pi, ledger, locks, privilege, hasInitialPrompt: hasCliInitialPrompt });
 
   runner.attach();
   registerScheduleTool(pi, store, runner, ledger);
