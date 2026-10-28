@@ -21,6 +21,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "worker": "tsx src/worker.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
@@ -62,9 +63,12 @@
     "@earendil-works/pi-ai": ">=0.80.0",
     "@earendil-works/pi-coding-agent": ">=0.84.1",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.1.0",
     "typebox": "^1.0.0",
     "typescript": "^5.9.0",
-    "vitest": "^3.1.0",
-    "@vitest/coverage-v8": "^3.1.0"
+    "vitest": "^3.1.0"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15"
   }
 }

@@ -5,6 +5,19 @@ implemented in the MVP. It is grounded in research on prospective memory,
 silent failures in production agent runtimes, multi-agent failure taxonomies,
 and durable-execution practice.
 
+## Execution isolation in this fork
+
+New jobs default to owner-session execution; storage scope never routes messages.
+The captured session ID and workspace are checked before delivery and after waits;
+session runtime replacement cancels pending delivery. Background jobs run only in
+the external worker, which creates fresh headless sessions with no prior chat.
+Legacy jobs with no target are visible but ineligible, never silently migrated.
+
+Worker scans propagate errors to a nonzero process exit. Child processes have a
+10-minute timeout below the 30-minute stale job-lock threshold; process groups are
+cleaned up on success, failure, timeout and service shutdown. Results and transcripts
+are persisted separately. See [setup and limitations](BACKGROUND.md).
+
 ## Thesis
 
 > Reliable agent scheduling is an OS problem with an LLM payload: deterministic
@@ -94,7 +107,7 @@ prompts.
 errors into fluent false digests; ~70% of silent failures found by humans.
 
 **Mitigation:**
-- Isolated fire prompt (`prompt.ts`) with explicit contract:
+- Labeled fire prompt (`prompt.ts`) with explicit contract (fresh context only for background jobs):
   - report tool failures; do not invent findings
   - say “No findings” when empty
   - prefer evidence over claims
@@ -192,7 +205,7 @@ complex modules; governance is a regression engine, not a predictor.
 - **Corrupt / wrong-version store → quarantine** (`*.corrupt-<ts>`), never silent wipe.
   Restore over original path and retry — **no process freeze / restart required**
 - **StoreError on auto paths**: notify and return `[]`. UI or `console.error`.
-  Rate-limited (5m). `run_now` rethrows only
+  Rate-limited (5m). `run_now` and background worker scans rethrow
 - **run_now** serializes on the wave chain (never drops when ticker is active)
 - **Fire cap** counts `ok` + `error` attempts (not only successes)
 - Daily wall-clock: spring-forward gaps walk to next valid day; fall-back still platform-defined
@@ -235,7 +248,7 @@ the extension runtime instead of the task reaching the agent.
 | Idempotency scan window | Last **200** JSONL lines only; heavy backlog can age out a `delivered` record |
 | Project root / scope | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root. Note: `.pi/` is gitignored, so **project-scoped jobs are machine-local**, not team-shared via git (treat "project" as "namespaced to this directory on this machine") |
 | File locks | Best-effort single-host; not a multi-machine consensus lock |
-| Global shell `cwd` | A global shell job has no `projectPath`, so it runs in the session `cwd` — a relative command is session-dependent. Use a project-scoped job or an absolute command for a deterministic cwd |
+| Global shell `cwd` | New jobs capture `executionCwd` independently of storage scope. No fallback to another session's workspace is allowed. |
 | Compaction collision | Prompt delivery during context compaction retries: send-probe immediately, then event-paced parking (500ms poll) with a probe send every 5s; after **120s** (`compactionWaitMs`) it fails via the normal error path — the task is never silently dropped, and even a cancelled compaction (no end event) costs at most one probe interval |
 
 ## Storage layout
@@ -263,7 +276,7 @@ schedule action=run_now id=…   # reports actual status, never invents success
 
 | Deferred | Why |
 |----------|-----|
-| OS daemon / durable workflow engine | In-session first; storage is ready |
+| Durable workflow engine | A systemd/cron worker is provided, not a transactional workflow engine |
 | True tool sandbox by tier | Needs pi platform support |
 | Confirm gate on `mutate` create | UX + platform dialogs |
 | Agent outcome verification / empty-result detector | Needs post-turn hooks or structured agent reply |

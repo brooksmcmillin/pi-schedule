@@ -28,6 +28,7 @@ import {
   scheduleFromParts,
 } from "./schedule.js";
 import type { ScheduleRunner } from "./runner.js";
+import { routingError } from "./routing.js";
 import { StoreError, defaultScope, type ScheduleStore } from "./store.js";
 import type {
   MissedWindowPolicy,
@@ -98,6 +99,9 @@ const ScheduleParams = Type.Object({
     Type.String({ description: 'Daily local time "HH:MM" (create)' }),
   ),
   scope: Type.Optional(StringEnum(["global", "project"] as const)),
+  target: Type.Optional(StringEnum(["session", "background"] as const, {
+    description: "Execution target: session (default, captured owner only) or background (fresh headless session). Storage scope does not select the execution target.",
+  })),
   /** Overdue policy: catch_up_one (default) | skip */
   missedWindow: Type.Optional(
     StringEnum(["catch_up_one", "skip"] as const),
@@ -140,6 +144,7 @@ function summarize(job: ScheduledJob, now: Date = new Date()): string {
     : "";
   return [
     `- ${job.id}  ${job.name}  [${state}/${job.scope}/${kind}/${job.tier}]`,
+    `  target: ${job.target ?? "legacy — recreate to enable execution"}  owner: ${job.ownerSessionId ?? "none"}  cwd: ${job.executionCwd ?? "unknown"}`,
     `  schedule: ${formatSchedule(job.schedule)}  missedWindow: ${job.missedWindow}${wake}`,
     `  next: ${next}  last: ${last}  runs: ${job.runCount}${maxRuns}` +
       (job.lastStatus ? `  lastStatus: ${job.lastStatus}` : "") +
@@ -176,9 +181,10 @@ export function registerScheduleTool(
       "Actions: create, list, cancel, enable, disable, run_now, history. " +
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
-      "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
-      "Due jobs fire on session start (unless pi was launched with an initial prompt) " +
-      "and while the session is open. See package docs/RELIABILITY.md.",
+      "Default target=session: follow-ups and keepalives run only in the creating session, never another chat. " +
+      "Use target=background explicitly for independent jobs run by the external worker in fresh sessions. " +
+      "scope=global/project selects storage, NOT session affinity. Legacy jobs must be recreated. " +
+      "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. See docs/BACKGROUND.md.",
     parameters: ScheduleParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -187,7 +193,7 @@ export function registerScheduleTool(
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd);
+            return handleCreate(store, params, cwd, ctx);
           case "list":
             return handleList(store, cwd);
           case "cancel":
@@ -236,10 +242,12 @@ function handleCreate(
     every?: string;
     dailyAt?: string;
     scope?: ScheduleScope;
+    target?: "session" | "background";
     missedWindow?: MissedWindowPolicy;
     tier?: PrivilegeTier;
   },
   cwd: string,
+  ctx: ExtensionContext,
 ) {
   if (!createLimiter.tryTake()) {
     return textResult(
@@ -268,7 +276,12 @@ function handleCreate(
     dailyAt: params.dailyAt,
     once: params.once,
   });
-  const scope: ScheduleScope = params.scope ?? defaultScope(cwd);
+  const target = params.target ?? "session";
+  const ownerSessionId = target === "session" ? ctx.sessionManager?.getSessionId() : undefined;
+  if (target === "session" && !ownerSessionId) {
+    return textResult("Error: session identity unavailable; refusing to create an unowned timer", { error: "session_identity_required" });
+  }
+  const scope: ScheduleScope = params.scope ?? (target === "background" ? "global" : defaultScope(cwd));
   const missedWindow = params.missedWindow ?? DEFAULT_MISSED_WINDOW;
   const tier: PrivilegeTier = normalized.forceTierMutate
     ? "mutate"
@@ -276,6 +289,9 @@ function handleCreate(
   const maxRuns = normalizeMaxRuns(params.maxRuns);
 
   const job = store.create({
+    target,
+    ownerSessionId,
+    executionCwd: cwd,
     name: params.name,
     prompt: normalized.prompt,
     action: normalized.action,
@@ -300,6 +316,7 @@ function handleCreate(
   return textResult(
     [
       `Created job ${job.id} "${job.name}" (${formatSchedule(job.schedule)}, ${job.scope}).`,
+      `target=${job.target}  owner=${job.ownerSessionId ?? "none"}  cwd=${job.executionCwd}`,
       `kind=${job.action}  tier=${job.tier}  missedWindow=${job.missedWindow}${shellBits}`,
       `Next run: ${formatRelative(job.nextRunAt)}.`,
       `Use schedule action=run_now id=${job.id} to fire immediately.`,
@@ -379,6 +396,9 @@ async function handleRunNow(
       { error: "terminated", job },
     );
   }
+
+  const routeError = routingError(job, ctx.sessionManager?.getSessionId(), cwd);
+  if (routeError) return textResult(`Did not fire job ${job.id}: ${routeError}`, { error: "routing_mismatch", job });
 
   const results = await runner.fireDue(ctx, {
     source: "run_now",
