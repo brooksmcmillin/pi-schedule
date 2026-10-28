@@ -967,6 +967,27 @@ describe("ScheduleRunner — compaction busy-wait", () => {
 });
 
 describe("execution routing", () => {
+  it("does not access stale context getters while recording cancellation", async () => {
+    const h = makeHarness();
+    h.runner.attach();
+    const job = h.createGlobal("check", "mutate");
+    h.store.upsert({ ...job, action: "shell", command: "check", wakeOn: "always" });
+    h.forceDue(job.id);
+    let stale = false;
+    Object.defineProperty(h.ctx, "cwd", { get: () => { if (stale) throw new Error("stale cwd"); return h.project; } });
+    Object.defineProperty(h.ctx, "hasUI", { get: () => { if (stale) throw new Error("stale UI"); return true; } });
+    vi.spyOn(h.pi, "exec").mockImplementation(async () => {
+      await h.emit("session_shutdown", {});
+      stale = true;
+      return { code: 0, killed: false, stdout: "done", stderr: "" };
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(h.runner.fireDue(h.ctx, { source: "tick" })).resolves.toHaveLength(1);
+    expect(h.store.get(job.id, h.project)?.lastError).toContain("owning session changed");
+    expect(h.customMessages).toEqual([]);
+    expect(h.sent).toEqual([]);
+    errors.mockRestore();
+  });
   it("cancels the rest of a wave and queued run_now across a reload", async () => {
     const h = makeHarness({ sendCompactionBusyTimes: 1 });
     h.runner.attach();

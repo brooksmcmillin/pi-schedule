@@ -567,6 +567,7 @@ export class ScheduleRunner {
     },
   ): Promise<ScheduledJob | null> {
     const epoch = this.sessionEpoch;
+    const cwd = ctx.cwd;
     const assertCurrent = () => {
       if (epoch !== this.sessionEpoch || this.routeError(job, ctx)) {
         throw new DeliveryCancelled("Scheduled delivery cancelled: owning session changed during execution");
@@ -719,7 +720,7 @@ export class ScheduleRunner {
       return finalJob;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (ctx.hasUI && !(err instanceof DeliveryCancelled)) {
+      if (!(err instanceof DeliveryCancelled) && ctx.hasUI) {
         ctx.ui.notify(
           `[pi-schedule] failed to fire "${job.name}": ${message}`,
           "error",
@@ -732,7 +733,7 @@ export class ScheduleRunner {
       // between the candidate-read and the fire is reflected in both the
       // advance and the forensic ledger (the success path already uses
       // `fresh`).
-      const errorSubject = this.opts.store.get(job.id, ctx.cwd);
+      const errorSubject = this.opts.store.get(job.id, cwd);
       if (!errorSubject) return null;
       const errorKey = opts.forced ? key : idempotencyKeyFor(errorSubject);
       const updated = this.opts.store.markAttempt(errorSubject, at, "error", {
