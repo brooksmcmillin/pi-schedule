@@ -720,7 +720,8 @@ export class ScheduleRunner {
       return finalJob;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (!(err instanceof DeliveryCancelled) && ctx.hasUI) {
+      const cancelled = epoch !== this.sessionEpoch || err instanceof DeliveryCancelled;
+      if (!cancelled && ctx.hasUI) {
         ctx.ui.notify(
           `[pi-schedule] failed to fire "${job.name}": ${message}`,
           "error",

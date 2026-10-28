@@ -967,7 +967,7 @@ describe("ScheduleRunner — compaction busy-wait", () => {
 });
 
 describe("execution routing", () => {
-  it("does not access stale context getters while recording cancellation", async () => {
+  it.each([false, true])("does not access stale context getters after shutdown (exec rejects=%s)", async (reject) => {
     const h = makeHarness();
     h.runner.attach();
     const job = h.createGlobal("check", "mutate");
@@ -979,11 +979,12 @@ describe("execution routing", () => {
     vi.spyOn(h.pi, "exec").mockImplementation(async () => {
       await h.emit("session_shutdown", {});
       stale = true;
+      if (reject) throw new Error("exec failed");
       return { code: 0, killed: false, stdout: "done", stderr: "" };
     });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(h.runner.fireDue(h.ctx, { source: "tick" })).resolves.toHaveLength(1);
-    expect(h.store.get(job.id, h.project)?.lastError).toContain("owning session changed");
+    expect(h.store.get(job.id, h.project)?.lastError).toMatch(/owning session changed|exec failed/);
     expect(h.customMessages).toEqual([]);
     expect(h.sent).toEqual([]);
     errors.mockRestore();
