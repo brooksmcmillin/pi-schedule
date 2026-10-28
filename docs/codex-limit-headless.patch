@@ -1,0 +1,8 @@
+--- a/codex-limit.ts
++++ b/codex-limit.ts
+@@ -426,4 +426,5 @@
+   const queueUpdate = (ctx: ExtensionContext) => {
++    if (!ctx.hasUI) return Promise.resolve(undefined);
+     inFlight = inFlight.catch(() => undefined).then(() => updateUsage(ctx));
+     return inFlight;
+   };

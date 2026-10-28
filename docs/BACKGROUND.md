@@ -91,6 +91,17 @@ processes produce nonzero CLI exits. An OS crash can still interrupt a run after
 side effects but before durable accounting; this is not exactly-once execution.
 A successful Pi process means the run finished, not that its task was correct.
 
+## Host UI-extension compatibility
+
+The live host's local `codex-limit.ts` footer queued asynchronous usage refreshes
+in print mode and crashed after shutdown on a stale `ExtensionContext`, even when
+the agent had already returned its response. Its local `queueUpdate` now returns
+immediately when `!ctx.hasUI`. The reproducible one-line change is retained in
+[codex-limit-headless.patch](codex-limit-headless.patch); this is a host extension
+fix, not a reason to ignore nonzero headless exits. Interactive usage display is
+unchanged. The installed-worker smoke passed with the normal configured extensions
+after this change.
+
 ## Migration
 
 1. Replace the upstream package entry with this fork, rather than loading both.
