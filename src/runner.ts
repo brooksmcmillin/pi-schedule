@@ -172,7 +172,7 @@ export class ScheduleRunner {
     this.privilege.attach(pi);
 
     pi.on("session_start", async (event, ctx) => {
-      this.sessionEpoch += 1;
+      const epoch = ++this.sessionEpoch;
       this.cwd = ctx.cwd;
       this.stopTicker();
       this.compacting = false; // fresh session cannot be mid-compaction
@@ -185,7 +185,7 @@ export class ScheduleRunner {
         await this.fireDue(ctx, { source: "session_start" });
       }
 
-      this.startTicker(ctx);
+      if (epoch === this.sessionEpoch) this.startTicker(ctx);
     });
 
     // Track compaction so scheduled wakes wait it out instead of crashing

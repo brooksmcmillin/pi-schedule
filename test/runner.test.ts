@@ -967,6 +967,22 @@ describe("ScheduleRunner — compaction busy-wait", () => {
 });
 
 describe("execution routing", () => {
+  it("does not restart an old ticker after shutdown during startup delivery", async () => {
+    const h = makeHarness();
+    h.runner.attach();
+    const job = h.createGlobal("check", "mutate");
+    h.store.upsert({ ...job, action: "shell", command: "check", wakeOn: "never" });
+    h.forceDue(job.id);
+    const ticker = vi.spyOn(h.runner as unknown as { startTicker: (ctx: ExtensionContext) => void }, "startTicker");
+    vi.spyOn(h.pi, "exec").mockImplementation(async () => {
+      await h.emit("session_shutdown", {});
+      return { code: 0, killed: false, stdout: "", stderr: "" };
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await h.emit("session_start", { reason: "startup" });
+    expect(ticker).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
   it.each([false, true])("does not access stale context getters after shutdown (exec rejects=%s)", async (reject) => {
     const h = makeHarness();
     h.runner.attach();
