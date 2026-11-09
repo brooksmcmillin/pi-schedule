@@ -13,6 +13,10 @@ Published as a pi package (`pi install`).
 
 ## Install
 
+Requires Node >=22.13. The [authoritative store/protocol foundation](docs/AUTHORITY.md)
+uses built-in SQLite but is not yet activated; installation does not migrate jobs
+or replace current dispatch routing.
+
 ```bash
 pi install npm:pi-schedule
 # or local

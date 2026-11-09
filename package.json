@@ -52,7 +52,7 @@
   },
   "homepage": "https://github.com/pungggi/pi-schedule#readme",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
