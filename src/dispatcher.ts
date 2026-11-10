@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { listenAuthority, type AuthorityRequest } from "./authority-protocol.js";
 import { AuthorityStore, authorityPaths } from "./authority-store.js";
 import { ExecutionFailure, type ExecutionResult } from "./outcome.js";
+import { healthPath, writePrivateJson } from "./watchdog-health.js";
 import { AuthorityError, type AuthorityJob, type AuthorityRun, type RunFence } from "./authority-types.js";
 import { CreateRateLimiter, decideDue, idempotencyKeyFor, LIMITS, nextAfter } from "./policy.js";
 import { ScheduleRunner, TICK_MS } from "./runner.js";
@@ -284,6 +285,7 @@ export class Dispatcher {
       this.executions.add(promise);
       void promise.finally(() => this.executions.delete(promise));
     }
+    writePrivateJson(healthPath(authorityPaths(this.home).directory), { checkedAt: this.now().toISOString() });
   }
 
   private finish(job: AuthorityJob, fence: RunFence, outcome: "completed" | "failed", result: DeliveryResult) {

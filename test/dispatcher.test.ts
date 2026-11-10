@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { authorityPaths } from "../src/authority-store.js";
+import { healthPath } from "../src/watchdog-health.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +34,20 @@ afterEach(async () => {
 });
 
 describe("dispatcher", () => {
+  it("publishes health only after a successful scan with the injected clock", () => {
+    let now = new Date(at);
+    const { dispatcher, home } = fixture({ now: () => now });
+    dispatcher.scan();
+    const path = healthPath(authorityPaths(home).directory);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ checkedAt: at });
+    now = new Date("2026-11-09T00:01:00.000Z");
+    dispatcher.scan();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ checkedAt: now.toISOString() });
+    vi.spyOn(dispatcher.store, "snapshot").mockImplementation(() => { throw new Error("fixture scan failure"); });
+    now = new Date("2026-11-09T00:02:00.000Z");
+    expect(() => dispatcher.scan()).toThrow("fixture scan failure");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ checkedAt: "2026-11-09T00:01:00.000Z" });
+  });
   it("benchmarks six OS clients/manual/timer triggers against one background slot", async () => {
     const { dispatcher, home, execute, client } = fixture({ tickMs: 20 });
     await dispatcher.start();

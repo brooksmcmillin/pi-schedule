@@ -1,0 +1,13 @@
+[Unit]
+Description=Independent pi-schedule receipt watchdog
+
+[Service]
+Type=oneshot
+# Replace the absolute paths for the selected installation. No dependency on Pi or dispatcher startup.
+WorkingDirectory=/absolute/path/to/pi-schedule
+EnvironmentFile=-%h/.config/pi-schedule/watchdog.env
+ExecStart=/absolute/path/to/node --import /absolute/path/to/pi-schedule/node_modules/tsx/dist/loader.mjs /absolute/path/to/pi-schedule/src/watchdog-command.ts
+TimeoutStartSec=75
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
