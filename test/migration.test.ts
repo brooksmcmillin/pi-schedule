@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthorityStore, authorityPaths } from "../src/authority-store.js";
-import { Dispatcher } from "../src/dispatcher.js";
+import { Dispatcher, type Delivery, type OwnerConnection } from "../src/dispatcher.js";
 import { applyMigration, inspectMigration, readMigration, receiptPath, rollbackMigration, type MigrationPlan } from "../src/migration.js";
 import { defaultPaths, ScheduleStore } from "../src/store.js";
 import { JobLockManager } from "../src/lock.js";
@@ -74,6 +74,41 @@ describe("restartable migration and rollback (disposable, not live cutover proof
     const { ownerSessionId: _owner, target: _target, executionCwd: _cwd, ...legacy } = job;
     writeFileSync(paths.globalFile, JSON.stringify({ version: 1, jobs: [legacy] }));
     expect(inspectMigration(home, plan).jobs[0]).toEqual(job);
+  });
+
+  it.each([{ enabled: true }, { nextRunAt: "2027-01-01T00:00:00.000Z" }, { schedule: { type: "once", delay: "1m", delayMs: 60000 } }])("rejects definition overrides in runtime routing bindings: %j", (override) => {
+    const { home, paths, job, plan } = fixture();
+    const disabled = { ...job, enabled: false };
+    const original = JSON.stringify({ version: 1, jobs: [disabled] });
+    writeFileSync(paths.globalFile, original);
+    const invalid = JSON.parse(JSON.stringify({ ...plan, bindings: [{ ...plan.bindings[0], ...override }] }));
+    expect(() => inspectMigration(home, invalid)).toThrow(/routing-only/);
+    expect(existsSync(authorityPaths(home).directory)).toBe(false);
+    expect(() => applyMigration(home, invalid, attestation)).toThrow(/routing-only/);
+    expect(readFileSync(paths.globalFile, "utf8")).toBe(original);
+    expect(snapshot(home).jobs).toEqual([]);
+    expect(existsSync(receiptPath(home))).toBe(false);
+    applyMigration(home, plan, attestation);
+    expect(snapshot(home).jobs.map(({ job }) => job)).toEqual([disabled]);
+  });
+
+  it("diagnoses malformed runtime manifests and bindings without altering legacy sources", () => {
+    const { home, paths, plan } = fixture();
+    const original = readFileSync(paths.globalFile, "utf8");
+    const invalidPlans = [null, { ...plan, projects: null }, { ...plan, bindings: null },
+      ...[null, {}, { ...plan.bindings[0], target: "unknown" }, { ...plan.bindings[0], executionCwd: 17 }, { ...plan.bindings[0], ownerSessionId: "" }].map((binding) => ({ ...plan, bindings: [binding] }))];
+    for (const invalid of invalidPlans) {
+      expect(() => inspectMigration(home, JSON.parse(JSON.stringify(invalid)))).toThrow(/routing-only/);
+      expect(readFileSync(paths.globalFile, "utf8")).toBe(original);
+      expect(existsSync(authorityPaths(home).directory)).toBe(false);
+    }
+  });
+
+  it("allows harmless manifest metadata while preserving ordinary explicit bindings", () => {
+    const { home, plan, job } = fixture();
+    const annotated = { ...plan, notes: "Operator-reviewed routing; definitions stay in the legacy store" };
+    expect(inspectMigration(home, annotated).jobs).toEqual([job]);
+    expect(applyMigration(home, annotated, attestation).jobs).toEqual([job]);
   });
 
   it.each(["prepared", "fenced", "imported", "active"])("survives process exit after %s, preserving identity, cadence, history and pending work", (phase) => {
@@ -269,7 +304,37 @@ describe("restartable migration and rollback (disposable, not live cutover proof
     expect(JSON.parse(readFileSync(paths.projectFile(project), "utf8")).jobs).toEqual(jobs);
   });
 
-  it("pause survives restart and allows completion/reconciliation but denies new delivery and mutations", async () => {
+  it("rejects pre-pause offers while permitting started completion and explicit reconciliation during pause", async () => {
+    const { home, plan, job } = fixture(); applyMigration(home, plan, attestation);
+    const dispatcher = new Dispatcher({ home, tickMs: 60000, now: () => new Date(at) }); await dispatcher.start();
+    try {
+      dispatcher.store.addJob({ ...job, id: "reconcile-started" });
+      dispatcher.store.addJob({ ...job, id: "offered-before-pause" });
+      const owner = dispatcher.request({ op: "register_owner", sessionId: "exact-owner", cwd: home }) as OwnerConnection;
+      const completed = dispatcher.request({ op: "receive", owner, idle: true }) as Delivery;
+      dispatcher.request({ op: "begin_delivery", owner, fence: completed.fence });
+      const reconciled = dispatcher.request({ op: "receive", owner, idle: true }) as Delivery;
+      dispatcher.request({ op: "begin_delivery", owner, fence: reconciled.fence });
+      const offered = dispatcher.request({ op: "receive", owner, idle: true }) as Delivery;
+      expect(offered.job.id).toBe("offered-before-pause");
+      dispatcher.request({ op: "pause_admission", reason: "operator-maintenance" });
+      expect(() => dispatcher.request({ op: "begin_delivery", owner, fence: offered.fence })).toThrow(/Admission paused/);
+      expect(dispatcher.request({ op: "receive", owner, idle: true })).toBeNull();
+      expect(dispatcher.store.snapshot().runs.find((run) => run.runId === offered.fence.runId)?.state).toBe("interrupted");
+      expect(dispatcher.store.snapshot().runs.find((run) => run.runId === reconciled.fence.runId)?.uncertainty).toBe("executor_or_effect_unknown");
+      dispatcher.request({ op: "finish_delivery", owner, fence: completed.fence, outcome: "completed", detail: "Disposable receiver finished; no external effect attempted" });
+      dispatcher.request({ op: "unregister_owner", owner });
+      dispatcher.request({ op: "reconcile_execution", fence: reconciled.fence, executorStopped: true, effectsReconciled: true, outcome: "completed" });
+      const state = dispatcher.store.snapshot();
+      expect(state.runs.filter((run) => run.state === "completed")).toHaveLength(2);
+      expect(state.runs.filter((run) => run.state === "claimed" || run.state === "started")).toEqual([]);
+      expect(state.jobs.filter(({ job }) => job.runCount === 1)).toHaveLength(2);
+      expect(state.jobs.find(({ job }) => job.id === offered.job.id)?.job.nextRunAt).toBe(at);
+      expect(dispatcher.store.maintenance()?.phase).toBe("paused");
+    } finally { await dispatcher.close(); }
+  });
+
+  it("pause survives restart and denies new delivery and mutations without advancing cadence", async () => {
     const { home, plan, job } = fixture(); applyMigration(home, plan, attestation);
     let dispatcher = new Dispatcher({ home, tickMs: 60000 }); await dispatcher.start();
     dispatcher.request({ op: "pause_admission", reason: "operator-maintenance" });

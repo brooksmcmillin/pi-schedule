@@ -2,16 +2,20 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
 import { AuthorityStore, authorityPaths } from "./authority-store.js";
-import { AuthorityError, validateJob, type AuthorityJob, type AuthorityState } from "./authority-types.js";
+import { AuthorityError, authorityJobSchema, validateJob, type AuthorityJob, type AuthorityState } from "./authority-types.js";
 import { defaultPaths } from "./store.js";
 
-export interface MigrationPlan {
-  version: 1;
-  projects: string[];
-  // Explicit reviewed bindings, including existing bindings; never infer an owner.
-  bindings: { id: string; target: "session" | "background"; executionCwd: string; ownerSessionId?: string }[];
-}
+const bindingSchema = Type.Pick(authorityJobSchema, ["id", "target", "executionCwd", "ownerSessionId"], { additionalProperties: false });
+const migrationPlanSchema = Type.Object({
+  version: Type.Literal(1),
+  projects: Type.Array(Type.String()),
+  // Explicit routing only: definition overrides would violate preservation.
+  bindings: Type.Array(bindingSchema),
+}, { additionalProperties: true });
+export type MigrationPlan = Static<typeof migrationPlanSchema>;
 interface Backup { path: string; bytes: string; sha256: string }
 export interface MigrationReceipt {
   version: 1; id: string; home: string; planHash: string; storeId: string;
@@ -50,7 +54,8 @@ export function readMigration(home: string): MigrationReceipt {
 
 /** Dry-run only: does not use legacy readers that quarantine unknown schemas. */
 export function inspectMigration(home: string, plan: MigrationPlan) {
-  if (plan.version !== 1 || !Array.isArray(plan.projects) || !Array.isArray(plan.bindings) || !isAbsolute(home) || plan.projects.some((p) => !isAbsolute(p))) fail("Use manifest version 1 and absolute home/projects");
+  if (!Value.Check(migrationPlanSchema, plan)) fail("Use manifest version 1 with projects and routing-only bindings (id, target, executionCwd, ownerSessionId); definitions must remain unchanged");
+  if (!isAbsolute(home) || plan.projects.some((p) => !isAbsolute(p))) fail("Use absolute home/projects");
   const paths = defaultPaths(home);
   const names = [paths.globalFile, ...plan.projects.map(paths.projectFile)];
   if (new Set(names).size !== names.length || new Set(plan.bindings.map((b) => b.id)).size !== plan.bindings.length) fail("Duplicate source or binding identity");
