@@ -166,6 +166,14 @@ export class ScheduleRunner {
     this.privilege = opts.privilege ?? new PrivilegeGuard();
   }
 
+  /** Delivery only: authority claims/timing remain exclusively in the dispatcher. */
+  async executeClaimed(ctx: ExtensionContext, job: ScheduledJob, runId: string,
+    source: FireSource, forced: boolean, assertCurrent: () => void) {
+    const result = await this.deliver(ctx, job, { runId, source, forced }, assertCurrent);
+    if (result.wokeAgent) this.privilege.enter(job.tier ?? DEFAULT_TIER);
+    return result;
+  }
+
   /** Bind session lifecycle + privilege hooks. Call once from extension factory. */
   attach(): void {
     const { pi } = this.opts;

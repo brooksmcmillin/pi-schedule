@@ -12,7 +12,22 @@ import {
 export const MAX_AUTHORITY_FRAME_BYTES = 1024 * 1024;
 const IO_TIMEOUT_MS = 5000;
 const text = Type.String({ minLength: 1 });
+const ownerSchema = Type.Object({ sessionId: text, cwd: text, generation: text }, { additionalProperties: false });
+export const jobDefinitionSchema = Type.Omit(authorityJobSchema, [
+  "id", "enabled", "cancelled", "manualRequested", "terminated", "createdAt", "updatedAt",
+  "lastRunAt", "nextRunAt", "runCount", "lastStatus", "lastError", "lastIdempotencyKey", "lastShell",
+]);
 const requestSchema = Type.Union([
+  Type.Object({ op: Type.Literal("create_job"), definition: jobDefinitionSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("register_owner"), sessionId: text, cwd: text }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("receive"), owner: ownerSchema, idle: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("unregister_owner"), owner: ownerSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("begin_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("defer_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("finish_delivery"), owner: ownerSchema, fence: fenceSchema, outcome: Type.Union([Type.Literal("completed"), Type.Literal("failed")]), detail: Type.String(), lastShell: Type.Optional(authorityJobSchema.properties.lastShell) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("edit_job"), jobId: text, cwd: text, action: Type.Union([Type.Literal("cancel"), Type.Literal("enable"), Type.Literal("disable")]) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("run_now"), jobId: text, cwd: text, nextRunAt: text, requesterSessionId: Type.Optional(text) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("scan") }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("snapshot") }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("add_job"), job: authorityJobSchema }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("claim"), jobId: text, slotId: text, ownerId: text, at: text }, { additionalProperties: false }),
@@ -43,7 +58,8 @@ function dispatch(store: AuthorityStore, request: AuthorityRequest, buildId: str
 }
 
 /** One newline-delimited JSON request/response per private Unix connection. No TCP listener. */
-export async function listenAuthority(store: AuthorityStore, home: string) {
+export async function listenAuthority(store: AuthorityStore, home: string,
+  handler?: (request: AuthorityRequest, buildId: string) => unknown | Promise<unknown>) {
   const paths = authorityPaths(home);
   mkdirSync(paths.directory, { recursive: true, mode: 0o700 });
   chmodSync(paths.directory, 0o700);
@@ -64,7 +80,7 @@ export async function listenAuthority(store: AuthorityStore, home: string) {
           error: { code: "FRAME_TOO_LARGE", message: "Response exceeds protocol limit; inspect authority locally" } }) + "\n");
       } else socket.end(response);
     };
-    socket.on("data", (chunk: string) => {
+    socket.on("data", async (chunk: string) => {
       if (handled) return;
       bytes += Buffer.byteLength(chunk);
       buffer += chunk;
@@ -85,7 +101,9 @@ export async function listenAuthority(store: AuthorityStore, home: string) {
           throw new AuthorityError("VERSION_MISMATCH", `Authority requires protocol ${AUTHORITY_PROTOCOL_VERSION}, schema ${AUTHORITY_SCHEMA_VERSION}. Upgrade/reload pi-schedule clients and dispatcher together; state was not changed.`);
         }
         if (!Value.Check(envelopeSchema, envelope)) throw new AuthorityError("INVALID_REQUEST", "Invalid authority request or job; supply explicit target, absolute workspace and session owner");
-        const result = dispatch(store, envelope.request, envelope.buildId);
+        const result = handler
+          ? await handler(envelope.request, envelope.buildId)
+          : dispatch(store, envelope.request, envelope.buildId);
         respond(requestId, { ok: true, result });
       } catch (error) {
         respond(requestId, { ok: false, error: {

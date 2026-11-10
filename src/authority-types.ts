@@ -16,6 +16,8 @@ export class AuthorityError extends Error {
 export interface AuthorityJob extends ScheduledJob {
   target: "session" | "background";
   executionCwd: string;
+  cancelled?: boolean;
+  manualRequested?: boolean;
 }
 
 export interface RunFence {
@@ -59,6 +61,7 @@ export const authorityJobSchema = Type.Object({
   id: text, name: text, prompt: Type.String(),
   target: Type.Union([Type.Literal("session"), Type.Literal("background")]),
   ownerSessionId: Type.Optional(text), executionCwd: text,
+  cancelled: Type.Optional(Type.Boolean()), manualRequested: Type.Optional(Type.Boolean()),
   action: Type.Union([Type.Literal("prompt"), Type.Literal("shell"), Type.Literal("notify"), Type.Literal("message")]),
   command: optionalText,
   wakeOn: Type.Optional(Type.Union([Type.Literal("always"), Type.Literal("failure"), Type.Literal("success"), Type.Literal("never")])),

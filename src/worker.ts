@@ -1,10 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SchedulerClient } from "./client.js";
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ScheduleRunner } from "./runner.js";
-import { ScheduleStore } from "./store.js";
 import type { ScheduledJob } from "./types.js";
 
 const GUARD = fileURLToPath(new URL("./worker-guard.ts", import.meta.url));
@@ -119,62 +117,17 @@ export function createPromptExecutor(options: PromptExecutorOptions) {
 }
 
 export interface WorkerOptions {
-  store?: ScheduleStore;
+  home?: string;
   projects?: string[];
   jobId?: string;
-  now?: () => Date;
-  signal?: AbortSignal;
-  runPrompt?: (body: string, job: ScheduledJob, runId: string) => Promise<string>;
-  exec?: ExtensionAPI["exec"];
 }
 
-/** A single bounded scan, suitable for a systemd timer or cron. No interactive API. */
-export async function runWorker(options: WorkerOptions = {}): Promise<ScheduledJob[]> {
-  const store = options.store ?? new ScheduleStore();
-  const projects = (options.projects ?? []).map((path) => resolve(path));
-  const workspaces = new Set([
-    ...store.listGlobal().filter((job) => job.target === "background").map((job) => job.executionCwd),
-    ...projects,
-  ]);
-  const runPrompt = options.runPrompt ?? createPromptExecutor({ resultsDir: join(store.pathsInfo().globalDir, "results") });
-  const exec: ExtensionAPI["exec"] = options.exec ?? (async (command, args, opts) => runProcess(command, args, {
-    cwd: opts?.cwd ?? process.cwd(), timeoutMs: opts?.timeout ?? RUN_TIMEOUT_MS,
-  }));
-  const pi = {
-    exec,
-    sendUserMessage: () => { throw new Error("Worker cannot inject into an interactive session"); },
-  } as unknown as ExtensionAPI;
-  const controller = new AbortController();
-  const stop = () => controller.abort();
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
-  const signal = options.signal ?? controller.signal;
-  const runner = new ScheduleRunner({ store, pi, background: true, backgroundProjects: projects, runPrompt, now: options.now, signal });
-  const results: ScheduledJob[] = [];
-  const failures: string[] = [];
-  try {
-    for (const cwd of workspaces) {
-      if (signal.aborted) break;
-      if (!cwd || !isAbsolute(cwd)) continue;
-      try {
-        if (!statSync(cwd).isDirectory()) throw new Error(`Worker workspace is not a directory: ${cwd}`);
-        const ctx = { cwd, hasUI: false, isIdle: () => true } as ExtensionContext;
-        results.push(...await runner.fireDue(ctx, {
-          source: options.jobId ? "run_now" : "tick",
-          jobIds: options.jobId ? [options.jobId] : undefined,
-        }));
-      } catch (error) {
-        failures.push(`${cwd}: ${String(error)}`);
-      }
-    }
-    if (signal.aborted) throw new Error("Background worker stopped; no further jobs started");
-    if (failures.length) throw new Error(failures.join("\n"));
-    if (options.jobId && !results.length) throw new Error("No eligible background job fired (wrong target, disabled, terminated, locked, or unavailable workspace)");
-    return results;
-  } finally {
-    process.removeListener("SIGTERM", stop);
-    process.removeListener("SIGINT", stop);
-  }
+/** Compatibility CLI trigger. It never scans legacy files or executes jobs itself. */
+export async function runWorker(options: WorkerOptions = {}): Promise<unknown> {
+  if (options.projects?.length) throw new Error("Project file discovery was retired. Register explicit project jobs with the dispatcher; migration is a separate operation.");
+  const client = new SchedulerClient(options.home);
+  if (options.jobId) return client.runNow(options.jobId, process.cwd());
+  return client.control.request({ op: "scan" });
 }
 
 export function parseWorkerArgs(args: string[]): { projects: string[]; jobId?: string } {
@@ -193,8 +146,7 @@ export function parseWorkerArgs(args: string[]): { projects: string[]; jobId?: s
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const results = await runWorker(parseWorkerArgs(process.argv.slice(2)));
-    console.log(JSON.stringify(results.map(({ id, lastStatus, lastError }) => ({ id, lastStatus, lastError }))));
-    if (results.some((job) => job.lastStatus === "error")) process.exitCode = 1;
+    console.log(JSON.stringify(results));
   } catch (error) {
     console.error(String(error));
     process.exitCode = 1;

@@ -19,16 +19,18 @@ when it fires with zero chat context. That's what this file covers.
 - **Independent recurring report, scan, or check:** use
   `schedule target="background"` explicitly. The external worker launches a fresh
   headless Pi process and saves its transcript/results outside interactive chats.
-  Confirm the worker timer is installed; see [background setup](../../docs/BACKGROUND.md).
+  Confirm the per-user dispatcher is running; see [dispatcher operation](../../docs/DISPATCHER.md).
 - **Existing alternative:** if `schedule_prompt` is available, it can make
   session-bound reminders (`action=add,type=once,schedule="+20m"`). Verify the
   returned job's `session` equals the current session; its configurable default
   can be overridden. Do not set `model` for an owner-session continuation.
 - `scope=global/project` selects **storage only**, not execution routing.
   A UUID written inside a prompt does not bind anything.
-- Legacy jobs without a target remain listed but cannot run. Recreate them from
-  their original owner after checking current authorization; never infer an
-  owner or transfer a claim to a background worker.
+- Legacy JSON jobs are not scanned by the dispatcher. Migration is separate;
+  recreate/import only inspected jobs with explicit ownership and current authorization.
+- Dispatcher absence/incompatibility is visible; list/history show read-only
+  persisted state. Never substitute interactive execution or edit authority files.
+  `run_now` is an arbitrated request, not proof of completed execution.
 
 ## How firing works
 
@@ -66,11 +68,11 @@ Two consequences shape every decision below:
    tier by what the task *actually needs to run*, not by vibe. Quiet shell /
    notify / message fires never enter the privilege stack.
 
-Firing triggers: on **session start** when due (skipped if pi was launched
-with an initial prompt, e.g. `pi "fix the bug"`), and every **30s** while a
-owning session stays open and idle. Background jobs are scanned by the separate
-worker timer, not by interactive sessions. Closed owner sessions are never
-substituted; due jobs remain pending and follow missed-window policy on resume.
+The single dispatcher scans background jobs every **30s**. Session clients poll
+only their exact-owner inbox while idle; they never scan or advance schedules.
+Busy/closed owners stay pending, and reconnect follows missed-window policy.
+An old connection generation cannot start or acknowledge replacement work.
+Ambiguous started executions after restart require reconciliation, not replay.
 
 ## The tool at a glance
 
@@ -142,14 +144,16 @@ local timezone and DST-safe.
 
 ### `scope` — storage, not execution
 
-Background jobs default to global storage with their creating workspace captured.
-Explicit project background jobs require worker admission with `--project /path`.
+Background jobs default to global scope with their creating workspace captured.
+Project jobs are explicitly registered with that workspace in the dispatcher;
+legacy `--project` file discovery is retired, not a required admission command.
 
 - **project** (default when `.pi/` exists in cwd): tied to this repo. Use for
   anything repo-specific (security review, deps, tests). Launch pi from the
   project root so the cwd is right.
-- **global**: lives in `~/.pi-schedule`, independent of any project. Use for
-  cross-project / personal reminders and checks.
+- **global**: visible across projects; use for cross-project / personal reminders
+  and checks. Both scopes live in `~/.pi-schedule-authority/v1/authority.sqlite`;
+  visibility never changes execution ownership.
 
 ### `tier` — pick by what the task must *run*
 
@@ -254,22 +258,26 @@ schedule action=create name="standup-prep"
 
 ## Guardrails & verification
 
-- **Limits:** max 50 jobs per scope; max 10 creates/minute; max 5 fires at
-  session start, 3 per tick. Creating a tight loop (e.g. `every 1m`) will spam
-  the session — don't.
+- **Limits:** max 50 jobs per scope; max 10 creates/minute; at most 3 automatic
+  background starts per dispatcher scan and one offer per idle receiver poll.
+  Tight loops (e.g. `every 1m`) can still create noise.
 - **Verify a job works before trusting it:**
-  - `schedule action=run_now id=<id>` — session jobs only, in their owner; reports the
-    **actual** status (`ok` / `locked` / `error` / `skipped`), never fake success.
-  - Background manual run: `npm run worker -- --job <id>` from the package directory
-    (add `--project /path` only for an explicitly trusted project job).
-  - `schedule action=history id=<id>` — append-only forensic trail; worker details link
-    logs and `result.json`. A completed process is not proof of task correctness.
-  - `schedule action=list` — current jobs, next/last run, run count, last status.
+  - `schedule action=run_now id=<id>` requests dispatcher arbitration. Session jobs
+    require their requester owner/workspace; background jobs stay background.
+    `pending` or `superseded` is request status, **not completed execution**.
+  - Background CLI trigger: run the installed package's `src/worker.ts --job <id>`
+    through its Node/tsx launcher. It only requests the dispatcher; no local scanner
+    or `--project` discovery fallback exists.
+  - `schedule action=history id=<id>` shows durable run states and execution details
+    linking logs and `result.json`. A completed process is not application success.
+  - `schedule action=list` shows jobs, timing, run count and pending/due owner status,
+    including manual requests for disabled jobs. Offline views are read-only.
 - **Privilege failures are silent-ish.** If a `read_only` job tries to run
   `bash`, the call is blocked and the run likely errors. Check `history` if a
   job's `lastStatus` is `error`.
 - **Stop noise:** `action=disable` pauses a job (keeps it); `action=cancel`
-  deletes it. Don't leave noisy jobs running.
+  removes it from active listings while retaining historical run references.
+  Don't leave noisy jobs running.
 
 ## Reference
 

@@ -13,9 +13,9 @@ Published as a pi package (`pi install`).
 
 ## Install
 
-Requires Node >=22.13. The [authoritative store/protocol foundation](docs/AUTHORITY.md)
-uses built-in SQLite but is not yet activated; installation does not migrate jobs
-or replace current dispatch routing.
+Requires Node >=22.13 and a running per-user [dispatcher](docs/DISPATCHER.md).
+Interactive clients never run a local scheduler. The [authority store](docs/AUTHORITY.md)
+uses built-in SQLite; installation does not migrate legacy jobs or perform live cutover.
 
 ```bash
 pi install npm:pi-schedule
@@ -30,14 +30,14 @@ pi -e ./src/extension.ts
 This fork defaults new jobs to `target=session`: the creator's session ID and
 workspace are captured automatically, including for globally stored jobs.
 They never fire in a different session. Use explicit `target=background` for
-independent work: a separate worker starts fresh headless Pi sessions, with
+independent work: the dispatcher starts fresh headless Pi sessions, with
 results saved outside existing conversations.
 
 **Legacy jobs have no inferred owner and will not execute.** Recreate each
 with its intended target after checking authorization. Reload/restart every
 already-open Pi process to replace its old scheduler implementation.
 
-See [background worker setup and migration](docs/BACKGROUND.md).
+See [dispatcher operation](docs/DISPATCHER.md) and [background semantics](docs/BACKGROUND.md).
 Install this fork with `pi install git:github.com/brooksmcmillin/pi-schedule@<ref>`,
 replacing—not supplementing—the upstream package entry.
 
@@ -47,14 +47,15 @@ replacing—not supplementing—the upstream package entry.
 |-------|----------|
 | **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history |
 | **Kinds** | `prompt` (default) · `shell` · `notify` · `message` — what fires when due |
-| **Storage** | Hybrid: global `~/.pi-schedule/schedules.json` + project `.pi/schedule.json` |
+| **Storage** | Private `~/.pi-schedule-authority/v1/authority.sqlite`; global/project scope is metadata |
 | **Syntax** | Intervals (`30m`, `2h`, `1d`) and daily wall-clock (`09:00`) |
-| **Fire** | On session start when due; also while the session stays open (30s ticker) |
-| **Skip** | If pi was launched with an initial prompt (`pi "do X"`), due jobs are **not** checked or triggered for that start |
+| **Fire** | One dispatcher scans background slots every 30s; exact-owner inboxes are polled while idle |
+| **Pending** | Busy/closed owners stay due; reconnect obeys missed-window policy, never substitutes another session |
 | **Reliability** | Run ledger, single-flight locks, missed-window policy, privilege tiers, fire caps — see [docs/RELIABILITY.md](docs/RELIABILITY.md) |
 
-Storage is shared by the owner-session runner and the external background worker.
-The execution target, not the storage scope, determines which runner may fire.
+Only the dispatcher changes definitions, timing, claims and acknowledgments.
+The execution target, not storage scope, determines where work runs. With the
+dispatcher offline, list/history read persisted state and mutations fail visibly.
 
 **Compatibility:** works on any pi ≥ 0.74. On pi ≥ 0.84.1, privilege blocks also
 *terminate* the scheduled turn early — a read-only/suggest job that attempts a
@@ -158,12 +159,12 @@ schedule action=cancel id=abc123def456
 
 ## Delivery rules
 
-1. **Session start** (`startup` / `new` / `resume`): load hybrid store → process due jobs.
-2. **CLI initial prompt**: only on process **`startup`**, if launched with a user message (`pi "check this"`), skip due checks. `/new` and `/resume` still process due jobs.
-3. **Missed window**: `catch_up_one` fires once when overdue; `skip` only fires within grace (`max(2×tick, 25% period)`), otherwise advances without firing.
-4. **In-session ticker**: every 30s, if the agent is idle, process newly due jobs (capped).
-5. **`run_now`**: attempts force delivery; tool reports **actual** status (`ok` / `locked` / `error`), never invents success.
-6. **Locks + ledger**: O_EXCL file lock + idempotency key; forensic trail in `~/.pi-schedule/runs.jsonl`.
+1. **Dispatcher**: one per-user service scans background jobs every 30s and owns all timing/claim changes.
+2. **Session inbox**: clients register an exact session/workspace/connection generation and receive work only while idle; no local due-job scanner runs.
+3. **Missed window**: `catch_up_one` fires one overdue slot; `skip` advances misses beyond grace. Busy/closed owners stay pending until their own reconnect.
+4. **`run_now`**: requests dispatcher arbitration and reports pending/superseded, never invented completion. Session jobs require the requesting owner; background work never enters the requesting chat.
+5. **Fences + history**: SQLite transactions persist slot/run/generation identity before effects and fence every acknowledgment. Inspect `schedule history` for execution state.
+6. **Failure**: missing/incompatible service gives actionable status and read-only persisted list/history. Started runs surviving restart remain ambiguous until reconciled, never automatically replayed.
 
 Fired jobs use a labeled prompt contract. Session delivery retains the owner's
 conversation; only background delivery creates a fresh conversation:
@@ -185,12 +186,13 @@ jobId: …
 ## File layout
 
 ```
-~/.pi-schedule/
-  schedules.json
-  runs.jsonl
-  locks/
+~/.pi-schedule-authority/v1/
+  authority.sqlite       # Global/project scope is metadata in one authority.
+  dispatcher.sqlite      # Process-lifetime singleton lock.
+  control.sock
+  results/<runId>/       # Fresh background transcript/output/result metadata.
 
-<project>/.pi/schedule.json
+# Legacy ~/.pi-schedule/ and <project>/.pi/schedule.json are not scanned.
 ```
 
 ## Reliability
@@ -201,8 +203,8 @@ Summary of MVP mitigations:
 
 - External clock (`nextRunAt`), not LLM timing
 - Missed-window policy + fire caps
-- Single-flight locks + idempotency keys
-- Append-only run ledger (`history`)
+- Transactional single-flight claims + slot/generation fences
+- Durable run state (`history`); ambiguous started effects are not replayed
 - Privilege tiers in the fire prompt
 - Create rate limit + max jobs per scope
 
@@ -212,7 +214,7 @@ Summary of MVP mitigations:
 - action kinds: prompt / shell / notify / message (shell via `bash -lc`, optional `wakeOn`)
 - lifecycle: `once` one-shots + `maxRuns` bounded polling
 - no cron expressions yet
-- external worker via systemd user timer or cron; fresh headless sessions for background prompts
+- one supervisor-ready dispatcher entry point; fresh headless background sessions; installed supervision/migration/cutover are separate deployment work
 - `delivered` = action executed (prompt injected / shell finished / notify shown), not “agent finished correctly”
 
 ## Dev
