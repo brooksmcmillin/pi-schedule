@@ -15,7 +15,10 @@ Published as a pi package (`pi install`).
 
 Requires Node >=22.13 and a running per-user [dispatcher](docs/DISPATCHER.md).
 Interactive clients never run a local scheduler. The [authority store](docs/AUTHORITY.md)
-uses built-in SQLite; installation does not migrate legacy jobs or perform live cutover.
+uses built-in SQLite. `node docs/install-worker.mjs` generates a supervised dispatcher
+unit, and `npm run doctor` reports readiness and known client versions. Generation
+and package installation do not migrate data or activate services: follow the
+[explicit migration/rollback procedure](docs/MIGRATION.md) before live cutover.
 
 ```bash
 pi install npm:pi-schedule
@@ -33,9 +36,11 @@ They never fire in a different session. Use explicit `target=background` for
 independent work: the dispatcher starts fresh headless Pi sessions, with
 results saved outside existing conversations.
 
-**Legacy jobs have no inferred owner and will not execute.** Recreate each
-with its intended target after checking authorization. Reload/restart every
-already-open Pi process to replace its old scheduler implementation.
+**Legacy ownership is never inferred.** Inspect each job's intended target and
+authorization, then use the [restartable migration](docs/MIGRATION.md) to preserve
+IDs, definitions, owners, cadence and history. Identify only affected schedulers
+and their owners, let scheduled work settle, and reload those sessions when idle;
+do not restart unrelated Pi work or blindly recreate job identities.
 
 See [dispatcher operation](docs/DISPATCHER.md), [background semantics](docs/BACKGROUND.md),
 and the [independent receipt watchdog](docs/WATCHDOG.md) for missed-start/completion alerts.
@@ -217,7 +222,7 @@ Summary of MVP mitigations:
 - action kinds: prompt / shell / notify / message (shell via `bash -lc`, optional `wakeOn`)
 - lifecycle: `once` one-shots + `maxRuns` bounded polling
 - no cron expressions yet
-- one supervisor-ready dispatcher entry point; fresh headless background sessions; installed supervision/migration/cutover are separate deployment work
+- one supervised dispatcher unit generator and fresh headless background sessions; explicit restartable migration/compatible rollback tooling; live installation and cutover remain operator actions
 - `delivered` = action executed (prompt injected / shell finished / notify shown), not “agent finished correctly”
 
 ## Dev

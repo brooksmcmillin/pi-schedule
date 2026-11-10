@@ -23,6 +23,8 @@
   "scripts": {
     "worker": "tsx src/worker.ts",
     "dispatcher": "tsx src/dispatcher.ts",
+    "migration": "tsx src/migration-command.ts",
+    "doctor": "tsx src/doctor.ts",
     "watchdog": "tsx src/watchdog-command.ts",
     "test": "vitest run",
     "test:watch": "vitest",

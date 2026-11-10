@@ -7,18 +7,19 @@ Start the entry point with Node >=22.13 from an installed checkout:
 npm run dispatcher
 ```
 
-For continuous operation, a user supervisor must run the equivalent absolute
-command (`node --import <absolute tsx loader> <absolute src/dispatcher.ts>`) with
-Pi on PATH, a stable HOME, `Restart=on-failure` and process-group shutdown. This
-change supplies the restartable service entry point, not an installed service,
-legacy migration or a live cutover. Those are separate deployment work. Do not
-run the historical worker installer as a replacement for dispatcher supervision.
+For continuous operation, `node docs/install-worker.mjs` now generates a systemd
+user **dispatcher** service with absolute executable/loader/source paths, stable
+HOME, `Restart=on-failure` and process-group shutdown. It generates only; it does
+not start services or migrate live data. Follow [installation, migration and
+rollback](MIGRATION.md) before activation. `npm run doctor` reports runtime and
+registered-client identity, readiness and legacy-detection uncertainty.
 
 The service holds a separate SQLite writer lock for its lifetime. A second
 instance fails without stealing the live socket. After a crash, SQLite releases
 the lock; its next holder may remove an unresponsive old socket. A responsive
 foundation authority listener must be stopped first, never unlinked while live.
-State lives only in `~/.pi-schedule-authority/v1/`; old scheduler JSON is untouched.
+Active state lives only in `~/.pi-schedule-authority/v1/`. The explicit migration
+command backs up and retires legacy JSON paths; the dispatcher never scans them.
 This is cooperating same-user software, not containment against malicious code
 running with the same UID. Unix sockets are required; Windows service support is
 not supplied by this dispatcher transport.
