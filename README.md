@@ -37,7 +37,8 @@ results saved outside existing conversations.
 with its intended target after checking authorization. Reload/restart every
 already-open Pi process to replace its old scheduler implementation.
 
-See [dispatcher operation](docs/DISPATCHER.md) and [background semantics](docs/BACKGROUND.md).
+See [dispatcher operation](docs/DISPATCHER.md), [background semantics](docs/BACKGROUND.md),
+and the [independent receipt watchdog](docs/WATCHDOG.md) for missed-start/completion alerts.
 Install this fork with `pi install git:github.com/brooksmcmillin/pi-schedule@<ref>`,
 replacing—not supplementing—the upstream package entry.
 

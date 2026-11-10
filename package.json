@@ -23,6 +23,7 @@
   "scripts": {
     "worker": "tsx src/worker.ts",
     "dispatcher": "tsx src/dispatcher.ts",
+    "watchdog": "tsx src/watchdog-command.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
