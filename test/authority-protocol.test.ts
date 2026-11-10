@@ -50,7 +50,7 @@ describe("private authority protocol", () => {
     expect(await client.request({ op: "add_job", job: definition })).toEqual(definition);
     expect(await client.request({ op: "snapshot" })).toEqual(store.snapshot());
     const run = await client.request({ op: "claim", jobId: definition.id, slotId: "slot-1", ownerId: "dispatcher-1", at }) as AuthorityRun;
-    expect(run).toMatchObject({ jobId: definition.id, slotId: "slot-1", ownerId: "dispatcher-1", generation: 1, protocolVersion: 1, buildId: "test-build" });
+    expect(run).toMatchObject({ jobId: definition.id, slotId: "slot-1", ownerId: "dispatcher-1", generation: 1, protocolVersion: 2, buildId: "test-build" });
     expect(run.runId).toBeTruthy();
     expect(run.storeId).toBe(store.snapshot().storeId);
     await client.request({ op: "start", fence: fence(run), at });
@@ -66,8 +66,8 @@ describe("private authority protocol", () => {
   });
 
   it.each([
-    { protocolVersion: 0, schemaVersion: 1 }, { protocolVersion: 2, schemaVersion: 1 },
-    { protocolVersion: 1, schemaVersion: 2 }, { schemaVersion: 1 },
+    { protocolVersion: 0, schemaVersion: 1 }, { protocolVersion: 1, schemaVersion: 1 },
+    { protocolVersion: 2, schemaVersion: 2 }, { schemaVersion: 1 },
   ])("rejects incompatible client $protocolVersion/$schemaVersion before mutation", async (versions) => {
     const { home, store } = await fixture();
     store.addJob(job());
@@ -82,7 +82,7 @@ describe("private authority protocol", () => {
     const { home, store } = await fixture();
     const before = store.snapshot();
     for (const request of [{ op: "add_job", job: { ...job(), target: undefined } }, { op: "steal" }, { op: "start", fence: {} }]) {
-      const response = await raw(home, JSON.stringify({ protocolVersion: 1, schemaVersion: 1, requestId: "bad", buildId: "fixture", request }) + "\n");
+      const response = await raw(home, JSON.stringify({ protocolVersion: 2, schemaVersion: 1, requestId: "bad", buildId: "fixture", request }) + "\n");
       expect(response.error.code).toBe("INVALID_REQUEST");
       expect(store.snapshot()).toEqual(before);
     }
@@ -93,7 +93,7 @@ describe("private authority protocol", () => {
 
   it("accepts a valid frame fragmented across socket writes", async () => {
     const { home, store } = await fixture();
-    const frame = JSON.stringify({ requestId: "fragmented", protocolVersion: 1, schemaVersion: 1,
+    const frame = JSON.stringify({ requestId: "fragmented", protocolVersion: 2, schemaVersion: 1,
       buildId: "fixture", request: { op: "add_job", job: job() } }) + "\n";
     const response = await new Promise<any>((resolve, reject) => {
       const socket = createConnection(authorityPaths(home).socket);
@@ -158,7 +158,7 @@ describe("private authority protocol", () => {
         const request = JSON.parse(chunk.toString());
         if (kind === "empty") { socket.end(); return; }
         const response = { requestId: kind === "wrong-request" ? "other" : request.requestId,
-          protocolVersion: kind === "wrong-version" ? 99 : 1, schemaVersion: 1, ok: true, result: {} };
+          protocolVersion: kind === "wrong-version" ? 99 : 2, schemaVersion: 1, ok: true, result: {} };
         socket.end(kind === "malformed" ? "bad\n" : JSON.stringify(response) + "\n");
       });
     });

@@ -35,12 +35,15 @@ not supplied by this dispatcher transport.
   work, exact session ID plus current registration generation.
 - Each idle receiver pulls one offer. The dispatcher claims it before offering;
   receiver checks current identity/idle state, requests a fenced begin, executes,
-  then sends a fenced acknowledgment. Becoming busy before any effect safely
+  then sends a fenced acknowledgment only after execution. Prompt handoff is
+  recorded separately; the receiver waits for `agent_settled` before completion.
+  Application and notification receipts remain separate from both. Becoming busy before any effect safely
   defers the offer. Busy/closed owners are never substituted or sent follow-ups.
 - Reconnection revokes unstarted offers. Restart may reconcile claimed/pre-effect
   offers, but **started** runs remain active/ambiguous: inspect history, child
   processes/results and external effects before explicit recovery. Age is not
-  permission to replay a mutation. There is deliberately no automatic replay API.
+  permission to replay a mutation. There is deliberately no automatic replay API;
+  [explicit reconciliation](OUTCOMES.md) closes an unknown attempt without replaying it.
 - `run_now` returns pending/superseded, not invented completion. It preserves
   manual override of disabled/nonterminal jobs and missed-window skip; automatic
   scans still ignore disabled jobs. Re-enabling clears a once/maxRuns terminal

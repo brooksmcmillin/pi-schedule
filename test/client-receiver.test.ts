@@ -37,13 +37,19 @@ async function fixture() {
   function receiver(sessionId = "owner", cwd = "/workspace", busy = false) {
     let idle = !busy;
     const hooks = new Map<string, Function[]>();
-    const sendUserMessage = vi.fn(), sendMessage = vi.fn(), notify = vi.fn(), setStatus = vi.fn();
+    const sendUserMessage = vi.fn((prompt: string) => {
+      for (const hook of hooks.get("before_agent_start") ?? []) void hook({ prompt }, ctx);
+    }), sendMessage = vi.fn(), notify = vi.fn(), setStatus = vi.fn();
     const exec = vi.fn(async () => ({ code: 1, killed: false, stdout: "", stderr: "fixture failure" }));
-    const pi = { on: (event: string, handler: Function) => hooks.set(event, [...hooks.get(event) ?? [], handler]), sendUserMessage, sendMessage, exec } as unknown as ExtensionAPI;
+    const tools = new Map<string, any>();
+    const pi = { registerTool: (tool: any) => tools.set(tool.name, tool), on: (event: string, handler: Function) => hooks.set(event, [...hooks.get(event) ?? [], handler]), sendUserMessage, sendMessage, exec } as unknown as ExtensionAPI;
     const ctx = { cwd, hasUI: true, sessionManager: { getSessionId: () => sessionId }, isIdle: () => idle,
       hasPendingMessages: () => false, ui: { notify, setStatus } } as unknown as ExtensionContext;
     const instance = new OwnerReceiver(pi, client.control); instance.attach(); receivers.push(instance);
-    return { instance, ctx, hooks, sendUserMessage, sendMessage, notify, exec, setStatus, setIdle: (value: boolean) => { idle = value; } };
+    const settle = async (aborted = false) => {
+      for (const hook of hooks.get("agent_settled") ?? []) await hook({ aborted }, ctx);
+    };
+    return { instance, ctx, hooks, tools, settle, sendUserMessage, sendMessage, notify, exec, setStatus, setIdle: (value: boolean) => { idle = value; } };
   }
   return { home, dispatcher, client, create, receiver };
 }
@@ -55,6 +61,10 @@ describe("dispatcher clients and owner receiver", () => {
     for (const r of [foreign, wrongCwd]) await r.instance.poll(r.ctx);
     expect(f.dispatcher.store.snapshot().runs).toHaveLength(0);
     await owner.instance.poll(owner.ctx);
+    if (action === "prompt" || action === "shell") {
+      expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "started", handedOffAt: expect.any(String) });
+      await owner.settle();
+    }
     expect(f.dispatcher.store.snapshot().jobs[0]?.job).toMatchObject({ id: job.id, runCount: 1, terminated: "once", lastStatus: "ok" });
     expect(f.dispatcher.store.snapshot().runs[0]?.state).toBe("completed");
     expect(foreign.sendUserMessage).not.toHaveBeenCalled(); expect(wrongCwd.sendUserMessage).not.toHaveBeenCalled();
@@ -65,6 +75,60 @@ describe("dispatcher clients and owner receiver", () => {
       expect(owner.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("inspect failure"));
       expect(f.dispatcher.store.snapshot().jobs[0]?.job.lastShell?.code).toBe(1);
     }
+  });
+
+  it("handoff remains active until settled; validates receipts and records aborts independently", async () => {
+    const f = await fixture(); const job = await f.create(); const owner = f.receiver();
+    await owner.instance.poll(owner.ctx);
+    const run = f.dispatcher.store.snapshot().runs[0]!;
+    expect(run.state).toBe("started");
+    await owner.instance.poll(owner.ctx);
+    expect(owner.sendUserMessage).toHaveBeenCalledOnce();
+    const tool = owner.tools.get("schedule_outcome");
+    const receipt = { version: 1, runId: run.runId, jobId: job.id, application: "blocked_before_scan", notification: "failed" };
+    await expect(tool.execute("id", { ...receipt, runId: "stale" }, undefined, undefined, owner.ctx)).rejects.toThrow(/current scheduled run/);
+    await tool.execute("id", receipt, undefined, undefined, owner.ctx);
+    await owner.settle();
+    expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "completed", receipt });
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job.lastSuccessfulCompletionAt).toBeUndefined();
+  });
+
+  it("retains a succeeded receipt but records failed execution and no successful completion after abort", async () => {
+    const f = await fixture(); const job = await f.create(); const owner = f.receiver();
+    await owner.instance.poll(owner.ctx);
+    const run = f.dispatcher.store.snapshot().runs[0]!;
+    const receipt = { version: 1, runId: run.runId, jobId: job.id, application: "succeeded", notification: "sent" };
+    await owner.tools.get("schedule_outcome").execute("receipt", receipt, undefined, undefined, owner.ctx);
+    await owner.settle(true);
+    expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "failed", receipt });
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job.lastSuccessfulCompletionAt).toBeUndefined();
+  });
+
+  it("settling without a receipt remains unverified and aborted execution remains failed", async () => {
+    const f = await fixture(); await f.create(); const owner = f.receiver();
+    await owner.instance.poll(owner.ctx); await owner.settle(true);
+    expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "failed" });
+    expect(f.dispatcher.store.snapshot().runs[0]?.receipt).toBeUndefined();
+  });
+
+  it("ignores unrelated turn settlement while a scheduled shell awaits its own agent followup", async () => {
+    const f = await fixture(); const job = await f.create("shell", "mutate"); const owner = f.receiver();
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    owner.exec.mockImplementation(async () => { await paused; return { code: 1, killed: false, stdout: "", stderr: "fixture" }; });
+    const running = owner.instance.poll(owner.ctx);
+    await vi.waitFor(() => expect(owner.exec).toHaveBeenCalledOnce());
+    for (const hook of owner.hooks.get("before_agent_start") ?? []) await hook({ prompt: "unrelated human request" }, owner.ctx);
+    await owner.settle(true);
+    release(); await running;
+    const run = f.dispatcher.store.snapshot().runs[0]!;
+    expect(run).toMatchObject({ state: "started", handedOffAt: expect.any(String) });
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job.runCount).toBe(0);
+    const receipt = { version: 1, runId: run.runId, jobId: job.id, application: "succeeded", notification: "sent" };
+    await owner.tools.get("schedule_outcome").execute("receipt", receipt, undefined, undefined, owner.ctx);
+    await owner.settle();
+    expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "completed", receipt });
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job.runCount).toBe(1);
   });
 
   it("does not follow up, acknowledge or replay a shell across shutdown and session replacement", async () => {

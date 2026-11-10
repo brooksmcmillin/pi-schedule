@@ -55,13 +55,13 @@ transitions, not external systems: it cannot guarantee exactly-once Slack posts,
 GitHub merges or other effects. Crash recovery must reconcile external receipts
 before replay. Do not treat an elapsed timeout as authorization to duplicate work.
 
-## Unix-socket protocol v1
+## Unix-socket protocol v2
 
 `listenAuthority(store, home)` binds only the private `control.sock`; it does not
 scan due jobs, execute work or start a daemon. `AuthorityClient(home, buildId)`
 uses one newline-delimited JSON request/response per connection, with a 1 MiB
 frame limit and 5-second I/O timeout. Envelopes carry `requestId`,
-`protocolVersion: 1`, `schemaVersion: 1`, `buildId`, and `request`. Request IDs bind
+`protocolVersion: 2`, `schemaVersion: 1`, `buildId`, and `request`. Request IDs bind
 responses, not replay authorization. Client versions are checked before dispatch;
 incompatible clients get actionable upgrade/reload errors without mutations.
 
@@ -69,7 +69,7 @@ The foundation listener supports `snapshot`, `add_job`, `claim`, `start`,
 `interrupt` and `acknowledge`. The production dispatcher rejects those low-level
 mutation operations; clients use `create_job`, `edit_job`, `run_now`, `scan`,
 `register_owner`, `receive`, `begin_delivery`, `defer_delivery`,
-`finish_delivery`, and `unregister_owner` (see `AuthorityRequest`). Every transition carries a full
+`handoff_delivery`, `finish_delivery`, `reconcile_execution`, and `unregister_owner` (see `AuthorityRequest`). Every transition carries a full
 fence; claim build identity comes from the validated envelope. Responses carry
 matching version/request identity and either `{ok:true,result}` or
 `{ok:false,error:{code,message}}`. This is a cooperating same-user interface,
@@ -81,6 +81,11 @@ mean the mutation outcome is unknown: inspect persisted state before retrying.
 An oversized snapshot returns `FRAME_TOO_LARGE`; inspect state locally instead
 of interpreting it as an empty store. Shutdown closes only this listener's
 connections; it does not stop any executor or alter claims.
+
+Application and notification receipts, terminal acknowledgments, historical v1
+compatibility and explicit unknown-run reconciliation are described in
+[execution outcomes](OUTCOMES.md). Protocol v1 clients must reload: they acknowledge
+handoff too early and are rejected before mutation.
 
 ## Verification limits
 

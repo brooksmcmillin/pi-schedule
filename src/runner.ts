@@ -16,6 +16,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
+import type { ExecutionResult } from "./outcome.js";
 import {
   DEFAULT_JOB_ACTION,
   DEFAULT_SHELL_TIMEOUT_MS,
@@ -120,7 +121,7 @@ export interface RunnerOptions {
   signal?: AbortSignal;
   /** Project job files must be explicitly admitted by the worker operator. */
   backgroundProjects?: readonly string[];
-  runPrompt?: (body: string, job: ScheduledJob, runId: string) => Promise<string>;
+  runPrompt?: (body: string, job: ScheduledJob, runId: string) => Promise<string | ExecutionResult>;
   /** Delivery wait budget for in-flight compaction (default {@link COMPACTION_WAIT_MAX_MS}). */
   compactionWaitMs?: number;
   /** Poll interval for the compaction wait (default {@link COMPACTION_POLL_MS}). */
@@ -423,7 +424,7 @@ export class ScheduleRunner {
       deliverAs?: "followUp" | "steer";
     },
     assertCurrent: () => void,
-  ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
+  ): Promise<ExecutionResult & { wokeAgent: boolean; lastShell?: ShellRunResult }> {
     assertCurrent();
     const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
 
@@ -477,8 +478,8 @@ export class ScheduleRunner {
     });
     if (this.opts.background) {
       if (!this.opts.runPrompt) throw new Error("Background prompt executor unavailable");
-      const detail = await this.opts.runPrompt(body, job, opts.runId);
-      return { detail, wokeAgent: false };
+      const result = await this.opts.runPrompt(body, job, opts.runId);
+      return { ...(typeof result === "string" ? { detail: result } : result), wokeAgent: false };
     }
     await this.sendAgentMessage(body, ctx, opts.deliverAs, assertCurrent);
     return { detail: "prompt", wokeAgent: true };
@@ -494,7 +495,7 @@ export class ScheduleRunner {
       deliverAs?: "followUp" | "steer";
     },
     assertCurrent: () => void,
-  ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
+  ): Promise<ExecutionResult & { wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const command = job.command?.trim();
     if (!command) {
       throw new Error(`shell job "${job.name}" has no command`);
@@ -538,7 +539,7 @@ export class ScheduleRunner {
     );
 
     let wokeAgent = false;
-    let backgroundDetail = "";
+    let backgroundResult: ExecutionResult = {};
     if (shouldWakeForShell(job, lastShell)) {
       const instruction = selectShellFollowUp(job, lastShell);
       if (instruction) {
@@ -552,7 +553,8 @@ export class ScheduleRunner {
         });
         if (this.opts.background) {
           if (!this.opts.runPrompt) throw new Error("Background prompt executor unavailable");
-          backgroundDetail = await this.opts.runPrompt(body, job, opts.runId);
+          const result = await this.opts.runPrompt(body, job, opts.runId);
+          backgroundResult = typeof result === "string" ? { detail: result } : result;
         } else {
           await this.sendAgentMessage(body, ctx, opts.deliverAs, assertCurrent);
           wokeAgent = true;
@@ -560,8 +562,8 @@ export class ScheduleRunner {
       }
     }
 
-    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}${backgroundDetail ? ` ${backgroundDetail}` : ""}`;
-    return { detail, wokeAgent, lastShell };
+    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}${backgroundResult.detail ? ` ${backgroundResult.detail}` : ""}`;
+    return { ...backgroundResult, detail, wokeAgent, lastShell };
   }
 
   private async processOne(

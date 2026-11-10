@@ -162,6 +162,7 @@ function summarize(job: ScheduledJob, now: Date = new Date()): string {
     `  next: ${next}  last: ${last}  runs: ${job.runCount}${maxRuns}` +
       (job.lastStatus ? `  lastStatus: ${job.lastStatus}` : "") +
       shellInfo,
+    `  last successful application completion: ${job.lastSuccessfulCompletionAt ? formatRelative(job.lastSuccessfulCompletionAt, now) : "never verified"} (next due is independent)`,
     `  ${kind === "shell" ? "command" : "prompt"}: ${payload}`,
   ].join("\n");
 }

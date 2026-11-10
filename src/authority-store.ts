@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { applicationSucceeded, boundReceipt, type ExecutionResult } from "./outcome.js";
 import { chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +109,30 @@ export class AuthorityStore {
       const run = this.currentRun(state, fence);
       if (run.state !== "claimed") throw new AuthorityError("INVALID_TRANSITION", "Only a claimed run can start");
       run.state = "started";
+      run.startedAt = at;
+      run.updatedAt = at;
+      return run;
+    });
+  }
+
+  handoff(fence: RunFence, at: string): AuthorityRun {
+    requireTimestamp(at);
+    return this.mutate((state) => {
+      const run = this.currentRun(state, fence);
+      if (run.state !== "started") throw new AuthorityError("INVALID_TRANSITION", "Only started work can be handed off");
+      run.handedOffAt ??= at;
+      run.updatedAt = at;
+      return run;
+    });
+  }
+
+  /** Unknown is still active: neither elapsed time nor a lost connection permits replacement. */
+  markUnknown(fence: RunFence, at: string): AuthorityRun {
+    requireTimestamp(at);
+    return this.mutate((state) => {
+      const run = this.currentRun(state, fence);
+      if (run.state !== "started") throw new AuthorityError("INVALID_TRANSITION", "Only started work can become unknown");
+      run.uncertainty = "executor_or_effect_unknown";
       run.updatedAt = at;
       return run;
     });
@@ -121,6 +146,7 @@ export class AuthorityStore {
       const run = this.currentRun(state, fence);
       if (!active(run)) throw new AuthorityError("INVALID_TRANSITION", "Only an active run can be interrupted");
       run.state = "interrupted";
+      run.endedAt = at;
       run.detail = detail;
       run.updatedAt = at;
       return run;
@@ -128,7 +154,7 @@ export class AuthorityStore {
   }
 
   /** Execution acknowledgment, not a claim of application success or exactly-once effects. */
-  acknowledge(fence: RunFence, outcome: "completed" | "failed", nextRunAt: string, at: string, detail?: string, lastShell?: AuthorityJob["lastShell"]): AuthorityRun {
+  acknowledge(fence: RunFence, outcome: "completed" | "failed", nextRunAt: string, at: string, detail?: string, lastShell?: AuthorityJob["lastShell"], result: ExecutionResult = {}): AuthorityRun {
     requireTimestamp(nextRunAt);
     requireTimestamp(at);
     if (outcome !== "completed" && outcome !== "failed") throw new AuthorityError("INVALID_REQUEST", "Invalid execution outcome");
@@ -137,10 +163,16 @@ export class AuthorityStore {
       if (run.state !== "started") throw new AuthorityError("INVALID_TRANSITION", "Only a started run can acknowledge completion");
       run.state = outcome;
       run.updatedAt = at;
+      run.endedAt = at;
+      run.uncertainty = undefined;
       run.detail = detail;
+      run.receipt = boundReceipt(result.receipt, run.runId, run.jobId);
+      run.receiptInvalid = Boolean(result.receiptInvalid || (result.receipt !== undefined && !run.receipt));
+      run.processExit = result.processExit;
       const job = state.jobs.find((entry) => entry.job.id === run.jobId)!.job;
       job.nextRunAt = nextRunAt;
       job.lastRunAt = at;
+      if (outcome === "completed" && applicationSucceeded(run.receipt)) job.lastSuccessfulCompletionAt = at;
       job.updatedAt = at;
       job.runCount++;
       job.lastIdempotencyKey = run.slotId;

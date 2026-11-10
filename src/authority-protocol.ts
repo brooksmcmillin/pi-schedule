@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
+import { applicationReceiptSchema } from "./outcome.js";
 import { AuthorityStore, authorityPaths } from "./authority-store.js";
 import {
   AUTHORITY_PROTOCOL_VERSION, AUTHORITY_SCHEMA_VERSION, AuthorityError,
@@ -15,7 +16,7 @@ const text = Type.String({ minLength: 1 });
 const ownerSchema = Type.Object({ sessionId: text, cwd: text, generation: text }, { additionalProperties: false });
 export const jobDefinitionSchema = Type.Omit(authorityJobSchema, [
   "id", "enabled", "cancelled", "manualRequested", "terminated", "createdAt", "updatedAt",
-  "lastRunAt", "nextRunAt", "runCount", "lastStatus", "lastError", "lastIdempotencyKey", "lastShell",
+  "lastRunAt", "nextRunAt", "runCount", "lastStatus", "lastError", "lastIdempotencyKey", "lastShell", "lastSuccessfulCompletionAt",
 ]);
 const requestSchema = Type.Union([
   Type.Object({ op: Type.Literal("create_job"), definition: jobDefinitionSchema }, { additionalProperties: false }),
@@ -23,8 +24,10 @@ const requestSchema = Type.Union([
   Type.Object({ op: Type.Literal("receive"), owner: ownerSchema, idle: Type.Boolean() }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("unregister_owner"), owner: ownerSchema }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("begin_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("handoff_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("reconcile_execution"), fence: fenceSchema, executorStopped: Type.Literal(true), effectsReconciled: Type.Literal(true), outcome: Type.Union([Type.Literal("completed"), Type.Literal("failed")]), receipt: Type.Optional(applicationReceiptSchema) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("defer_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
-  Type.Object({ op: Type.Literal("finish_delivery"), owner: ownerSchema, fence: fenceSchema, outcome: Type.Union([Type.Literal("completed"), Type.Literal("failed")]), detail: Type.String(), lastShell: Type.Optional(authorityJobSchema.properties.lastShell) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("finish_delivery"), owner: ownerSchema, fence: fenceSchema, outcome: Type.Union([Type.Literal("completed"), Type.Literal("failed")]), detail: Type.String(), lastShell: Type.Optional(authorityJobSchema.properties.lastShell), receipt: Type.Optional(applicationReceiptSchema) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("edit_job"), jobId: text, cwd: text, action: Type.Union([Type.Literal("cancel"), Type.Literal("enable"), Type.Literal("disable")]) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("run_now"), jobId: text, cwd: text, nextRunAt: text, requesterSessionId: Type.Optional(text) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("scan") }, { additionalProperties: false }),

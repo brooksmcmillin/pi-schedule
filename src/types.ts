@@ -149,6 +149,8 @@ export interface ScheduledJob {
   nextRunAt: string;
   runCount: number;
   lastStatus: JobStatus;
+  /** Last completed execution with a successful run-bound application receipt, never mere handoff. */
+  lastSuccessfulCompletionAt?: string;
   /** Optional last error / skip reason. */
   lastError?: string;
   /** Last idempotency key that was successfully delivered. */

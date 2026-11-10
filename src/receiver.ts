@@ -2,6 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AuthorityClient } from "./authority-protocol.js";
 import type { AuthorityJob } from "./authority-types.js";
 import type { Delivery, OwnerConnection } from "./dispatcher.js";
+import { boundReceipt, type ApplicationReceipt } from "./outcome.js";
+import { registerOutcomeTool } from "./outcome-tool.js";
 import { PrivilegeGuard } from "./privilege.js";
 import { ScheduleRunner } from "./runner.js";
 import { ScheduleStore } from "./store.js";
@@ -14,6 +16,8 @@ export class OwnerReceiver {
   private polling = false;
   private readonly privilege = new PrivilegeGuard();
   private readonly runner: ScheduleRunner;
+  private pending?: { delivery: Delivery; owner: OwnerConnection; receipt?: ApplicationReceipt;
+    handedOff: boolean; agentStarted: boolean; settled: boolean; failed: boolean; lastShell?: AuthorityJob["lastShell"] };
 
   constructor(private readonly pi: ExtensionAPI, private readonly client: AuthorityClient, private readonly pollMs = 1000) {
     this.runner = new ScheduleRunner({ pi, store: new ScheduleStore(), privilege: this.privilege });
@@ -21,6 +25,34 @@ export class OwnerReceiver {
 
   attach(): void {
     this.privilege.attach(this.pi);
+    registerOutcomeTool(this.pi, (receipt, ctx) => {
+      const pending = this.pending;
+      if (!pending?.agentStarted || ctx.sessionManager.getSessionId() !== pending.owner.sessionId || ctx.cwd !== pending.owner.cwd ||
+          !boundReceipt(receipt, pending.delivery.fence.runId, pending.delivery.job.id)) {
+        throw new Error("Outcome does not belong to the current scheduled run/session");
+      }
+      pending.receipt = receipt;
+    });
+    this.pi.on("before_agent_start", (event) => {
+      const pending = this.pending;
+      if (!pending) return;
+      const { runId, jobId } = pending.delivery.fence;
+      if (event.prompt?.startsWith(`[scheduled-task]\nrunId: ${runId}\njobId: ${jobId}\n`)) {
+        pending.agentStarted = true;
+        pending.settled = false;
+        pending.failed = false;
+      }
+    });
+    this.pi.on("message_end", (event) => {
+      if (this.pending?.agentStarted && event.message.role === "assistant") this.pending.failed = event.message.stopReason === "error" || event.message.stopReason === "aborted";
+    });
+    this.pi.on("agent_settled", async (event, ctx) => {
+      if (!this.pending?.agentStarted) return;
+      this.pending.settled = true;
+      this.pending.failed ||= "aborted" in event && event.aborted === true;
+      try { await this.finishSettled(ctx); }
+      catch (error) { ctx.ui.setStatus("pi-schedule", `Completion unknown: ${String(error)}; inspect history before retry`); }
+    });
     this.pi.on("session_start", async (_event, ctx) => {
       await this.stop();
       const epoch = this.epoch;
@@ -36,14 +68,26 @@ export class OwnerReceiver {
     this.privilege.clear();
     const owner = this.owner;
     this.owner = undefined;
+    this.pending = undefined;
     if (owner) {
       try { await this.client.request({ op: "unregister_owner", owner }); }
       catch { /* A closed generation cannot start or acknowledge work. */ }
     }
   }
 
+  private async finishSettled(ctx: ExtensionContext): Promise<void> {
+    const pending = this.pending;
+    if (!pending?.handedOff || !pending.settled || pending.owner !== this.owner ||
+        ctx.sessionManager.getSessionId() !== pending.owner.sessionId || ctx.cwd !== pending.owner.cwd) return;
+    // Clear before the request: an ambiguous acknowledgment must never be blindly repeated.
+    this.pending = undefined;
+    await this.client.request({ op: "finish_delivery", owner: pending.owner, fence: pending.delivery.fence,
+      outcome: pending.failed ? "failed" : "completed", detail: pending.failed ? "Agent aborted or failed" : "Agent settled",
+      receipt: pending.receipt, lastShell: pending.lastShell });
+  }
+
   async poll(ctx: ExtensionContext): Promise<void> {
-    if (this.polling) return;
+    if (this.polling || this.pending) return;
     this.polling = true;
     const epoch = this.epoch;
     const sessionId = ctx.sessionManager?.getSessionId();
@@ -74,8 +118,9 @@ export class OwnerReceiver {
         await this.client.request({ op: "defer_delivery", owner, fence: delivery.fence });
         return;
       }
+      this.pending = { delivery, owner, handedOff: false, agentStarted: false, settled: false, failed: false };
       let outcome: "completed" | "failed" = "completed";
-      let result: { detail?: string; lastShell?: AuthorityJob["lastShell"] };
+      let result: { detail?: string; lastShell?: AuthorityJob["lastShell"]; wokeAgent?: boolean };
       try {
         result = await this.runner.executeClaimed(ctx, delivery.job, delivery.fence.runId,
           delivery.forced ? "run_now" : "tick", delivery.forced, () => {
@@ -83,7 +128,15 @@ export class OwnerReceiver {
           });
       } catch (error) { outcome = "failed"; result = { detail: String(error) }; }
       if (!current()) return; // Never acknowledge a replacement session's execution.
-      await this.client.request({ op: "finish_delivery", owner, fence: delivery.fence, outcome, detail: result.detail ?? "", lastShell: result.lastShell });
+      if (outcome === "completed" && result.wokeAgent && this.pending) {
+        await this.client.request({ op: "handoff_delivery", owner, fence: delivery.fence });
+        this.pending.handedOff = true;
+        this.pending.lastShell = result.lastShell;
+        await this.finishSettled(ctx);
+      } else {
+        this.pending = undefined;
+        await this.client.request({ op: "finish_delivery", owner, fence: delivery.fence, outcome, detail: result.detail ?? "", lastShell: result.lastShell });
+      }
       ctx.ui.setStatus("pi-schedule", "dispatcher connected");
     } catch (error) {
       if (!current()) return;
