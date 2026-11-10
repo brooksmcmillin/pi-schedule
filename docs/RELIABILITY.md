@@ -1,5 +1,13 @@
 # pi-schedule reliability model
 
+> **Historical architecture reference.** This guide describes the legacy MVP
+> runner, including JSON/JSONL storage, local tickers, file locks and synchronous
+> `run_now` outcomes. Those operational descriptions are not current dispatcher
+> instructions. Use [DISPATCHER.md](DISPATCHER.md) for authority storage, pending
+> manual requests, exact-owner delivery and restart behavior; migration/cutover
+> remain separate deployment work. The research and policy rationale below are
+> retained as historical context.
+
 This document captures the failure modes we design against and the mitigations
 implemented in the MVP. It is grounded in research on prospective memory,
 silent failures in production agent runtimes, multi-agent failure taxonomies,

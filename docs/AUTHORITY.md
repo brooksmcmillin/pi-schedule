@@ -1,9 +1,9 @@
 # Authoritative storage and claim contract
 
-This foundation is **not activated** by the current extension or worker. Dispatcher
-integration, migration, supervision and runtime cutover are separate work. Do not
-copy active jobs into both stores or point the legacy runner at authority files.
-Merging this code is not live scheduler verification.
+The extension and worker CLI now use the [dispatcher](DISPATCHER.md), which owns
+this store. Migration, installed supervision and runtime cutover remain separate
+work. Do not copy active jobs into both stores or point legacy runners at authority
+files. Merging this code is not live scheduler verification.
 
 ## Namespace and compatibility
 
@@ -25,7 +25,8 @@ do not copy a live database without its journal.
 Definitions require explicit target, absolute execution workspace and, only for
 session targets, owner session ID. Existing schedule/action/policy/payload fields
 are retained. `addJob` only inserts: it cannot overwrite a job around a run fence.
-Job editing/removal and scheduling policy belong to dispatcher integration.
+Dispatcher edits are transactional and reject active/ambiguous executors.
+Cancellation retains a hidden disabled definition for run-history referential integrity.
 
 ## Atomic claims
 
@@ -64,8 +65,11 @@ frame limit and 5-second I/O timeout. Envelopes carry `requestId`,
 responses, not replay authorization. Client versions are checked before dispatch;
 incompatible clients get actionable upgrade/reload errors without mutations.
 
-Operations are `snapshot`, `add_job`, `claim`, `start`, `interrupt` and
-`acknowledge` (see exported `AuthorityRequest`). Every transition carries a full
+The foundation listener supports `snapshot`, `add_job`, `claim`, `start`,
+`interrupt` and `acknowledge`. The production dispatcher rejects those low-level
+mutation operations; clients use `create_job`, `edit_job`, `run_now`, `scan`,
+`register_owner`, `receive`, `begin_delivery`, `defer_delivery`,
+`finish_delivery`, and `unregister_owner` (see `AuthorityRequest`). Every transition carries a full
 fence; claim build identity comes from the validated envelope. Responses carry
 matching version/request identity and either `{ok:true,result}` or
 `{ok:false,error:{code,message}}`. This is a cooperating same-user interface,

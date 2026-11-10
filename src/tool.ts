@@ -31,11 +31,24 @@ import type { ScheduleRunner } from "./runner.js";
 import { routingError } from "./routing.js";
 import { StoreError, defaultScope, type ScheduleStore } from "./store.js";
 import type {
+  CreateJobInput,
   MissedWindowPolicy,
   PrivilegeTier,
   ScheduledJob,
   ScheduleScope,
 } from "./types.js";
+
+export interface ScheduleToolStore {
+  readonly status?: string;
+  create(input: CreateJobInput): ScheduledJob | Promise<ScheduledJob>;
+  listForCwd(cwd: string): ScheduledJob[] | Promise<ScheduledJob[]>;
+  get(id: string, cwd: string): ScheduledJob | undefined | Promise<ScheduledJob | undefined>;
+  remove(id: string, cwd: string): ScheduledJob | undefined | Promise<ScheduledJob | undefined>;
+  setEnabled(id: string, cwd: string, enabled: boolean): ScheduledJob | undefined | Promise<ScheduledJob | undefined>;
+  pathsInfo(): ReturnType<ScheduleStore["pathsInfo"]>;
+  runNow?(id: string, cwd: string, requesterSessionId?: string): Promise<unknown>;
+  history?(id?: string, limit?: number): Promise<unknown>;
+}
 
 const ScheduleParams = Type.Object({
   action: StringEnum([
@@ -167,8 +180,8 @@ function textResult(text: string, details: Record<string, unknown> = {}) {
 
 export function registerScheduleTool(
   pi: ExtensionAPI,
-  store: ScheduleStore,
-  runner: ScheduleRunner,
+  store: ScheduleToolStore,
+  runner?: Pick<ScheduleRunner, "fireDue">,
   ledger?: RunLedger,
 ): void {
   const runLedger = ledger ?? new RunLedger(store.pathsInfo().runsFile);
@@ -193,18 +206,22 @@ export function registerScheduleTool(
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd, ctx);
+            return await handleCreate(store, params, cwd, ctx);
           case "list":
-            return handleList(store, cwd);
+            return await handleList(store, cwd);
           case "cancel":
-            return handleCancel(store, params.id, cwd);
+            return await handleCancel(store, params.id, cwd);
           case "enable":
-            return handleEnable(store, params.id, cwd, true);
+            return await handleEnable(store, params.id, cwd, true);
           case "disable":
-            return handleEnable(store, params.id, cwd, false);
+            return await handleEnable(store, params.id, cwd, false);
           case "run_now":
             return await handleRunNow(store, runner, params.id, cwd, ctx);
           case "history":
+            if (store.history) {
+              const result = await store.history(params.id, params.limit);
+              return textResult(JSON.stringify(result, null, 2), { history: result });
+            }
             return handleHistory(runLedger, params.id, params.limit);
           default:
             return textResult(`Unknown action: ${String(params.action)}`, {
@@ -226,8 +243,8 @@ export function registerScheduleTool(
   });
 }
 
-function handleCreate(
-  store: ScheduleStore,
+async function handleCreate(
+  store: ScheduleToolStore,
   params: {
     name?: string;
     kind?: string;
@@ -288,7 +305,7 @@ function handleCreate(
     : (params.tier ?? DEFAULT_TIER);
   const maxRuns = normalizeMaxRuns(params.maxRuns);
 
-  const job = store.create({
+  const job = await store.create({
     target,
     ownerSessionId,
     executionCwd: cwd,
@@ -325,25 +342,25 @@ function handleCreate(
   );
 }
 
-function handleList(store: ScheduleStore, cwd: string) {
-  const jobs = store.listForCwd(cwd);
+async function handleList(store: ScheduleToolStore, cwd: string) {
+  const jobs = await store.listForCwd(cwd);
   if (jobs.length === 0) {
     return textResult(
-      "No scheduled jobs. Create one with action=create, name, kind (optional), prompt or command, and every or dailyAt.",
+      `${store.status ?? ""}\nNo scheduled jobs. Create one with action=create, name, kind (optional), prompt or command, and every or dailyAt.`,
       { jobs: [] },
     );
   }
-  const body = ["Scheduled jobs:", ...jobs.map((j) => summarize(j))].join("\n");
+  const body = [store.status ?? "Scheduled jobs:", ...jobs.map((j) => summarize(j))].join("\n");
   return textResult(body, { jobs });
 }
 
-function handleCancel(store: ScheduleStore, id: string | undefined, cwd: string) {
+async function handleCancel(store: ScheduleToolStore, id: string | undefined, cwd: string) {
   if (!id?.trim()) {
     return textResult('Error: "id" is required for cancel', {
       error: "id_required",
     });
   }
-  const removed = store.remove(id.trim(), cwd);
+  const removed = await store.remove(id.trim(), cwd);
   if (!removed) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -352,8 +369,8 @@ function handleCancel(store: ScheduleStore, id: string | undefined, cwd: string)
   });
 }
 
-function handleEnable(
-  store: ScheduleStore,
+async function handleEnable(
+  store: ScheduleToolStore,
   id: string | undefined,
   cwd: string,
   enabled: boolean,
@@ -364,7 +381,7 @@ function handleEnable(
       { error: "id_required" },
     );
   }
-  const job = store.setEnabled(id.trim(), cwd, enabled);
+  const job = await store.setEnabled(id.trim(), cwd, enabled);
   if (!job) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -375,8 +392,8 @@ function handleEnable(
 }
 
 async function handleRunNow(
-  store: ScheduleStore,
-  runner: ScheduleRunner,
+  store: ScheduleToolStore,
+  runner: Pick<ScheduleRunner, "fireDue"> | undefined,
   id: string | undefined,
   cwd: string,
   ctx: ExtensionContext,
@@ -386,7 +403,11 @@ async function handleRunNow(
       error: "id_required",
     });
   }
-  const job = store.get(id.trim(), cwd);
+  if (store.runNow) {
+    const result = await store.runNow(id.trim(), cwd, ctx.sessionManager?.getSessionId());
+    return textResult(`Dispatcher run request: ${JSON.stringify(result)}. Inspect list/history for execution; pending is not completion.`, { result });
+  }
+  const job = await store.get(id.trim(), cwd);
   if (!job) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
@@ -400,11 +421,12 @@ async function handleRunNow(
   const routeError = routingError(job, ctx.sessionManager?.getSessionId(), cwd);
   if (routeError) return textResult(`Did not fire job ${job.id}: ${routeError}`, { error: "routing_mismatch", job });
 
+  if (!runner) throw new Error("Dispatcher unavailable; no interactive fallback");
   const results = await runner.fireDue(ctx, {
     source: "run_now",
     jobIds: [job.id],
   });
-  const updated = results[0] ?? store.get(job.id, cwd);
+  const updated = results[0] ?? await store.get(job.id, cwd);
 
   // Report actual outcome — never invent "Fired" (fail-plausible in our own tool).
   if (!results.length || !updated) {

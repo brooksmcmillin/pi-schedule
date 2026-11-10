@@ -22,8 +22,13 @@ function active(run: AuthorityRun): boolean {
 export class AuthorityStore {
   private readonly db: DatabaseSync;
 
-  constructor(home: string = homedir()) {
+  constructor(home: string = homedir(), readOnly = false) {
     const paths = authorityPaths(home);
+    if (readOnly) {
+      this.db = new DatabaseSync(paths.database, { readOnly: true });
+      try { this.read(); } catch (error) { this.db.close(); throw error; }
+      return;
+    }
     mkdirSync(paths.directory, { recursive: true, mode: 0o700 });
     chmodSync(paths.directory, 0o700);
     // The private directory protects database/journal creation under permissive umasks.
@@ -65,13 +70,25 @@ export class AuthorityStore {
     });
   }
 
-  claim(jobId: string, slotId: string, ownerId: string, buildId: string, at: string): AuthorityRun {
+  /** Dispatcher-only policy edits; never replace a definition around an active executor. */
+  updateJob(jobId: string, update: (job: AuthorityJob) => void): AuthorityJob {
+    return this.mutate((state) => {
+      const entry = state.jobs.find((entry) => entry.job.id === jobId);
+      if (!entry || entry.job.cancelled) throw new AuthorityError("JOB_NOT_FOUND", `Unknown job ${jobId}`);
+      if (state.runs.some((run) => run.jobId === jobId && active(run))) throw new AuthorityError("CLAIM_BUSY", "Job has an active or ambiguous executor; inspect history before editing");
+      update(entry.job);
+      validateJob(entry.job);
+      return entry.job;
+    });
+  }
+
+  claim(jobId: string, slotId: string, ownerId: string, buildId: string, at: string, forced = false): AuthorityRun {
     for (const [label, value] of Object.entries({ jobId, slotId, ownerId, buildId })) requireText(value, label);
     requireTimestamp(at);
     return this.mutate((state) => {
       const entry = state.jobs.find((entry) => entry.job.id === jobId);
       if (!entry) throw new AuthorityError("JOB_NOT_FOUND", `Unknown job ${jobId}`);
-      if (!entry.job.enabled || entry.job.terminated) throw new AuthorityError("JOB_DISABLED", `Job ${jobId} is disabled or terminated`);
+      if ((!entry.job.enabled && !forced) || entry.job.terminated || entry.job.cancelled) throw new AuthorityError("JOB_DISABLED", `Job ${jobId} is disabled or terminated`);
       if (state.runs.some((run) => run.jobId === jobId && active(run))) throw new AuthorityError("CLAIM_BUSY", "Job still has an active executor. Reconcile it; elapsed time alone is not proof of death.");
       if (state.runs.some((run) => run.jobId === jobId && run.slotId === slotId && run.state !== "interrupted")) throw new AuthorityError("SLOT_CONSUMED", "This slot already has a terminal attempt; do not replay external effects blindly");
       if (entry.generation === Number.MAX_SAFE_INTEGER) throw new AuthorityError("GENERATION_EXHAUSTED", "Claim generation exhausted; archive and replace this job identity");
@@ -111,7 +128,7 @@ export class AuthorityStore {
   }
 
   /** Execution acknowledgment, not a claim of application success or exactly-once effects. */
-  acknowledge(fence: RunFence, outcome: "completed" | "failed", nextRunAt: string, at: string): AuthorityRun {
+  acknowledge(fence: RunFence, outcome: "completed" | "failed", nextRunAt: string, at: string, detail?: string, lastShell?: AuthorityJob["lastShell"]): AuthorityRun {
     requireTimestamp(nextRunAt);
     requireTimestamp(at);
     if (outcome !== "completed" && outcome !== "failed") throw new AuthorityError("INVALID_REQUEST", "Invalid execution outcome");
@@ -120,12 +137,17 @@ export class AuthorityStore {
       if (run.state !== "started") throw new AuthorityError("INVALID_TRANSITION", "Only a started run can acknowledge completion");
       run.state = outcome;
       run.updatedAt = at;
+      run.detail = detail;
       const job = state.jobs.find((entry) => entry.job.id === run.jobId)!.job;
       job.nextRunAt = nextRunAt;
       job.lastRunAt = at;
       job.updatedAt = at;
       job.runCount++;
       job.lastIdempotencyKey = run.slotId;
+      job.lastStatus = outcome === "completed" ? "ok" : "error";
+      job.lastError = outcome === "failed" ? detail : undefined;
+      job.lastShell = lastShell;
+      job.manualRequested = false;
       // Existing lastStatus is a legacy delivery summary, not application outcome.
       if (job.schedule.type === "once" || (job.maxRuns !== undefined && job.runCount >= job.maxRuns)) {
         job.enabled = false;
