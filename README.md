@@ -57,7 +57,9 @@ Only the dispatcher changes definitions, timing, claims and acknowledgments.
 The execution target, not storage scope, determines where work runs. With the
 dispatcher offline, list/history read persisted state and mutations fail visibly.
 
-**Compatibility:** works on any pi ≥ 0.74. On pi ≥ 0.84.1, privilege blocks also
+**Compatibility:** owner execution completion requires Pi's `agent_settled` hook;
+there is no handoff-as-completion fallback. Reload clients and restart the
+dispatcher together for protocol v2. See [execution/application receipts](docs/OUTCOMES.md). On pi ≥ 0.84.1, privilege blocks also
 *terminate* the scheduled turn early — a read-only/suggest job that attempts a
 mutating tool ends without a wasted follow-up model call (mixed read+mutate
 batches still report findings in text). On older pi the extra field is ignored
@@ -163,7 +165,7 @@ schedule action=cancel id=abc123def456
 2. **Session inbox**: clients register an exact session/workspace/connection generation and receive work only while idle; no local due-job scanner runs.
 3. **Missed window**: `catch_up_one` fires one overdue slot; `skip` advances misses beyond grace. Busy/closed owners stay pending until their own reconnect.
 4. **`run_now`**: requests dispatcher arbitration and reports pending/superseded, never invented completion. Session jobs require the requesting owner; background work never enters the requesting chat.
-5. **Fences + history**: SQLite transactions persist slot/run/generation identity before effects and fence every acknowledgment. Inspect `schedule history` for execution state.
+5. **Fences + history**: SQLite persists slot/run/generation identity before effects. History separates dispatch, execution, application and notification outcomes. Handoff or exit0 alone never proves successful work; `schedule_outcome` records a run-bound application receipt.
 6. **Failure**: missing/incompatible service gives actionable status and read-only persisted list/history. Started runs surviving restart remain ambiguous until reconciled, never automatically replayed.
 
 Fired jobs use a labeled prompt contract. Session delivery retains the owner's

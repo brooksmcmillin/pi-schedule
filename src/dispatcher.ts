@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { listenAuthority, type AuthorityRequest } from "./authority-protocol.js";
 import { AuthorityStore, authorityPaths } from "./authority-store.js";
+import { ExecutionFailure, type ExecutionResult } from "./outcome.js";
 import { AuthorityError, type AuthorityJob, type AuthorityRun, type RunFence } from "./authority-types.js";
 import { CreateRateLimiter, decideDue, idempotencyKeyFor, LIMITS, nextAfter } from "./policy.js";
 import { ScheduleRunner, TICK_MS } from "./runner.js";
@@ -18,7 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 export interface OwnerConnection { sessionId: string; cwd: string; generation: string }
 export interface Delivery { job: AuthorityJob; fence: RunFence; forced: boolean }
-export interface DeliveryResult { detail?: string; lastShell?: AuthorityJob["lastShell"] }
+export interface DeliveryResult extends ExecutionResult { lastShell?: AuthorityJob["lastShell"] }
 export interface DispatcherOptions {
   home?: string;
   now?: () => Date;
@@ -91,6 +92,7 @@ export class Dispatcher {
       // Started is ambiguous and stays active, including mutating headless children.
       for (const run of this.store.snapshot().runs) {
         if (run.state === "claimed") this.store.interrupt(fenceFor(run), "Restart before begin; previous dispatcher/connection cannot start", this.now().toISOString());
+        else if (run.state === "started") this.store.markUnknown(fenceFor(run), this.now().toISOString());
       }
       this.listener = await listenAuthority(this.store, this.home, (request) => this.request(request));
       this.timer = setInterval(() => {
@@ -184,6 +186,19 @@ export class Dispatcher {
         this.requireDelivery(request.owner, request.fence);
         return this.store.interrupt(request.fence, "Exact receiver confirms no effect attempted; waiting for idle", this.now().toISOString());
       }
+      case "handoff_delivery": {
+        this.requireDelivery(request.owner, request.fence);
+        return this.store.handoff(request.fence, this.now().toISOString());
+      }
+      case "reconcile_execution": {
+        const state = this.store.snapshot();
+        const run = state.runs.find((entry) => entry.runId === request.fence.runId);
+        if (!run?.uncertainty || !request.executorStopped || !request.effectsReconciled) {
+          throw new AuthorityError("RECONCILIATION_REQUIRED", "Confirm executor death and reconcile external effects for an unknown run before closing it");
+        }
+        const job = state.jobs.find((entry) => entry.job.id === run.jobId)!.job;
+        return this.finish(job, request.fence, request.outcome, { receipt: request.receipt, detail: "Executor stopped; effects reconciled explicitly" });
+      }
       case "begin_delivery": {
         this.requireDelivery(request.owner, request.fence);
         return this.store.start(request.fence, this.now().toISOString());
@@ -215,6 +230,8 @@ export class Dispatcher {
     for (const run of this.store.snapshot().runs) {
       if (run.ownerId === owner.generation && run.state === "claimed") {
         this.store.interrupt(fenceFor(run), "Connection revoked before begin; old generation cannot start", this.now().toISOString());
+      } else if (run.ownerId === owner.generation && run.state === "started") {
+        this.store.markUnknown(fenceFor(run), this.now().toISOString());
       }
     }
   }
@@ -241,7 +258,7 @@ export class Dispatcher {
     }
     const slotId = forced && Date.parse(job.nextRunAt) > at.getTime() ? `manual:${idempotencyKeyFor(job)}` : idempotencyKeyFor(job);
     try {
-      const run = this.store.claim(job.id, slotId, ownerId, "dispatcher-v1", at.toISOString(), forced);
+      const run = this.store.claim(job.id, slotId, ownerId, "pi-schedule-0.3.6-receipts-v1", at.toISOString(), forced);
       return { job, fence: fenceFor(run), forced };
     } catch (error) {
       if (error instanceof AuthorityError && ["CLAIM_BUSY", "SLOT_CONSUMED"].includes(error.code)) return;
@@ -260,7 +277,9 @@ export class Dispatcher {
       count++;
       const promise = Promise.resolve().then(() => this.execute(delivery)).then(
         (result) => { this.finish(job, delivery.fence, "completed", result); },
-        (error) => { this.finish(job, delivery.fence, "failed", { detail: String(error) }); },
+        (error) => { this.finish(job, delivery.fence, "failed", {
+          ...(error instanceof ExecutionFailure ? error.result : {}), detail: String(error),
+        }); },
       ).catch((error) => { this.lastScanError = String(error); console.error(`[pi-schedule] acknowledgment failed: ${error}`); });
       this.executions.add(promise);
       void promise.finally(() => this.executions.delete(promise));
@@ -269,7 +288,7 @@ export class Dispatcher {
 
   private finish(job: AuthorityJob, fence: RunFence, outcome: "completed" | "failed", result: DeliveryResult) {
     const at = this.now();
-    return this.store.acknowledge(fence, outcome, nextAfter(job.schedule, at).toISOString(), at.toISOString(), result.detail, result.lastShell);
+    return this.store.acknowledge(fence, outcome, nextAfter(job.schedule, at).toISOString(), at.toISOString(), result.detail, result.lastShell, result);
   }
 }
 

@@ -1,3 +1,4 @@
+import { outcomeSummary } from "./outcome.js";
 import { homedir } from "node:os";
 import { AuthorityClient } from "./authority-protocol.js";
 import { AuthorityStore } from "./authority-store.js";
@@ -71,6 +72,6 @@ export class SchedulerClient implements ScheduleToolStore {
   }
   async history(id?: string, limit = 10) {
     const state = await this.snapshot();
-    return { dispatcherStatus: this.status, runs: state.runs.filter((run) => !id || run.jobId === id).slice(-Math.min(Math.max(limit, 1), 50)).reverse() };
+    return { dispatcherStatus: this.status, runs: state.runs.filter((run) => !id || run.jobId === id).slice(-Math.min(Math.max(limit, 1), 50)).reverse().map((run) => ({ ...run, outcomeSummary: outcomeSummary(run) })) };
   }
 }

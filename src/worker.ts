@@ -1,9 +1,10 @@
 import { SchedulerClient } from "./client.js";
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ScheduledJob } from "./types.js";
+import { boundReceipt, ExecutionFailure, type ExecutionResult } from "./outcome.js";
 
 const GUARD = fileURLToPath(new URL("./worker-guard.ts", import.meta.url));
 const RUN_TIMEOUT_MS = 10 * 60_000; // Below the job lock's 30-minute stale threshold.
@@ -87,7 +88,7 @@ export interface PromptExecutorOptions {
 }
 
 export function createPromptExecutor(options: PromptExecutorOptions) {
-  return async (body: string, job: ScheduledJob, runId: string): Promise<string> => {
+  return async (body: string, job: ScheduledJob, runId: string): Promise<ExecutionResult> => {
     const directory = join(options.resultsDir, runId);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const env = { ...process.env };
@@ -95,10 +96,25 @@ export function createPromptExecutor(options: PromptExecutorOptions) {
     delete env["PI_SESSION_FILE"];
     env["PI_SCHEDULE_WORKER_CHILD"] = "1";
     env["PI_SCHEDULE_WORKER_TIER"] = job.tier;
+    env["PI_SCHEDULE_RUN_ID"] = runId;
+    env["PI_SCHEDULE_JOB_ID"] = job.id;
+    env["PI_SCHEDULE_RECEIPT_PATH"] = join(directory, "application.json");
     const metadata = { runId, jobId: job.id, cwd: job.executionCwd, target: "background", startedAt: new Date().toISOString() };
     const resultFile = join(directory, "result.json");
     const record = (data: Record<string, unknown>) => writeFileSync(resultFile, JSON.stringify({ ...metadata, ...data }, null, 2) + "\n", { mode: 0o600 });
     record({ status: "running" });
+    let processExit: ExecutionResult["processExit"];
+    const readOutcome = (): ExecutionResult => {
+      let receipt: unknown;
+      let receiptInvalid = false;
+      try {
+        receipt = JSON.parse(readFileSync(join(directory, "application.json"), "utf8"));
+        receiptInvalid = !boundReceipt(receipt, runId, job.id);
+      } catch (error) {
+        receiptInvalid = (error as NodeJS.ErrnoException).code !== "ENOENT";
+      }
+      return { receipt, receiptInvalid, processExit };
+    };
     try {
       const result = await (options.processRunner ?? runProcess)(options.piCommand ?? process.env["PI_SCHEDULE_PI"] ?? "pi", [
         "--print", "--session-dir", join(directory, "sessions"), "--extension", GUARD,
@@ -106,12 +122,13 @@ export function createPromptExecutor(options: PromptExecutorOptions) {
         cwd: job.executionCwd!, env, input: body,
         timeoutMs: options.timeoutMs ?? RUN_TIMEOUT_MS, outputDir: directory,
       });
+      processExit = { code: result.code, killed: result.killed };
       if (result.code !== 0 || result.killed) throw new Error(`Headless Pi exit=${result.code} killed=${result.killed}; logs: ${directory}`);
       record({ status: "completed", endedAt: new Date().toISOString(), exitCode: result.code });
-      return `background completed; logs: ${directory}`;
+      return { detail: "background execution completed", ...readOutcome() };
     } catch (error) {
       record({ status: "error", endedAt: new Date().toISOString(), error: String(error) });
-      throw error;
+      throw new ExecutionFailure(String(error), readOutcome());
     }
   };
 }

@@ -2,9 +2,10 @@ import { isAbsolute } from "node:path";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ScheduledJob } from "./types.js";
+import { applicationReceiptSchema, boundReceipt, type ApplicationReceipt, type ExecutionResult } from "./outcome.js";
 
 export const AUTHORITY_SCHEMA_VERSION = 1;
-export const AUTHORITY_PROTOCOL_VERSION = 1;
+export const AUTHORITY_PROTOCOL_VERSION = 2;
 
 export class AuthorityError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -38,6 +39,13 @@ export interface AuthorityRun extends RunFence {
   protocolVersion: number;
   buildId: string;
   detail?: string;
+  startedAt?: string;
+  handedOffAt?: string;
+  endedAt?: string;
+  uncertainty?: "executor_or_effect_unknown";
+  receipt?: ApplicationReceipt;
+  receiptInvalid?: boolean;
+  processExit?: ExecutionResult["processExit"];
 }
 
 export interface AuthorityState {
@@ -81,6 +89,7 @@ export const authorityJobSchema = Type.Object({
   runCount: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   lastStatus: Type.Union([Type.Literal("ok"), Type.Literal("error"), Type.Literal("skipped"), Type.Literal("locked"), Type.Null()]),
   lastError: optionalText, lastIdempotencyKey: optionalText, lastShell: Type.Optional(shell),
+  lastSuccessfulCompletionAt: Type.Optional(iso),
 }, { additionalProperties: false });
 
 export const fenceSchema = Type.Object({
@@ -90,8 +99,12 @@ export const fenceSchema = Type.Object({
 const runSchema = Type.Object({
   ...fenceSchema.properties,
   state: Type.Union([Type.Literal("claimed"), Type.Literal("started"), Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
-  claimedAt: iso, updatedAt: iso, protocolVersion: Type.Literal(AUTHORITY_PROTOCOL_VERSION), buildId: text,
+  claimedAt: iso, updatedAt: iso, protocolVersion: Type.Union([Type.Literal(1), Type.Literal(AUTHORITY_PROTOCOL_VERSION)]), buildId: text,
   detail: optionalText,
+  startedAt: Type.Optional(iso), handedOffAt: Type.Optional(iso), endedAt: Type.Optional(iso),
+  uncertainty: Type.Optional(Type.Literal("executor_or_effect_unknown")),
+  receipt: Type.Optional(applicationReceiptSchema), receiptInvalid: Type.Optional(Type.Boolean()),
+  processExit: Type.Optional(Type.Object({ code: Type.Integer(), killed: Type.Boolean() }, { additionalProperties: false })),
 }, { additionalProperties: false });
 
 const stateSchema = Type.Object({
@@ -136,6 +149,8 @@ export function validateState(value: unknown): asserts value is AuthorityState {
     if (!entry || run.storeId !== state.storeId || run.generation > entry.generation) throw new AuthorityError("INVALID_STATE", "Inconsistent run fence");
     requireTimestamp(run.claimedAt);
     requireTimestamp(run.updatedAt);
+    for (const at of [run.startedAt, run.handedOffAt, run.endedAt]) if (at !== undefined) requireTimestamp(at);
+    if (run.receipt && !boundReceipt(run.receipt, run.runId, run.jobId)) throw new AuthorityError("INVALID_STATE", "Unbound application receipt");
     if (run.state === "claimed" || run.state === "started") {
       if (activeJobs.has(run.jobId) || run.generation !== entry.generation) throw new AuthorityError("INVALID_STATE", "Multiple or stale active claims");
       activeJobs.add(run.jobId);
