@@ -61,10 +61,46 @@ export class AuthorityStore {
 
   snapshot(): AuthorityState { return this.read(); }
 
+  maintenance(): { id: string; phase: string } | undefined {
+    if (!this.db.prepare("SELECT name FROM sqlite_master WHERE name='maintenance'").get()) return;
+    const row = this.db.prepare("SELECT document FROM maintenance WHERE id=1").get();
+    return row ? JSON.parse(String(row.document)) : undefined;
+  }
+
+  /** Durable admission pause survives dispatcher restart; completion/reconciliation stays available. */
+  pause(id: string, phase = "paused"): void {
+    requireText(id, "maintenance identity");
+    this.db.exec("CREATE TABLE IF NOT EXISTS maintenance (id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+    this.db.prepare("INSERT OR REPLACE INTO maintenance VALUES (1, ?)").run(JSON.stringify({ id, phase }));
+  }
+
+  importMigration(id: string, jobs: AuthorityJob[]): void {
+    const maintenance = this.maintenance();
+    if (maintenance?.id === id && maintenance.phase === "imported") return;
+    if (maintenance?.id !== id || maintenance.phase !== "paused") throw new AuthorityError("MAINTENANCE_REQUIRED", "Pause this migration before importing");
+    this.mutate((state) => {
+      if (state.jobs.length || state.runs.length) throw new AuthorityError("DESTINATION_NOT_EMPTY", "Initial migration requires an empty authority; preserve and inspect existing state");
+      state.jobs = jobs.map((job) => ({ job: structuredClone(job), generation: 0 }));
+      this.pause(id, "imported");
+    });
+  }
+
+  activateMigration(id: string): void {
+    const maintenance = this.maintenance();
+    if (maintenance?.id !== id || !["imported", "active"].includes(maintenance.phase)) throw new AuthorityError("MAINTENANCE_REQUIRED", "Only an imported migration may activate");
+    this.pause(id, "active");
+  }
+
+  private requireAdmission(): void {
+    const maintenance = this.maintenance();
+    if (maintenance && maintenance.phase !== "active") throw new AuthorityError("MAINTENANCE", `Admission paused (${maintenance.phase}); finish migration or reconcile runs before activation`);
+  }
+
   /** Insert definitions only. Existing identities cannot be overwritten around a claim fence. */
   addJob(job: AuthorityJob): AuthorityJob {
     validateJob(job);
     return this.mutate((state) => {
+      this.requireAdmission();
       if (state.jobs.some((entry) => entry.job.id === job.id)) throw new AuthorityError("JOB_EXISTS", `Job ${job.id} already exists`);
       state.jobs.push({ job: structuredClone(job), generation: 0 });
       return job;
@@ -74,6 +110,7 @@ export class AuthorityStore {
   /** Dispatcher-only policy edits; never replace a definition around an active executor. */
   updateJob(jobId: string, update: (job: AuthorityJob) => void): AuthorityJob {
     return this.mutate((state) => {
+      this.requireAdmission();
       const entry = state.jobs.find((entry) => entry.job.id === jobId);
       if (!entry || entry.job.cancelled) throw new AuthorityError("JOB_NOT_FOUND", `Unknown job ${jobId}`);
       if (state.runs.some((run) => run.jobId === jobId && active(run))) throw new AuthorityError("CLAIM_BUSY", "Job has an active or ambiguous executor; inspect history before editing");
@@ -87,6 +124,7 @@ export class AuthorityStore {
     for (const [label, value] of Object.entries({ jobId, slotId, ownerId, buildId })) requireText(value, label);
     requireTimestamp(at);
     return this.mutate((state) => {
+      this.requireAdmission();
       const entry = state.jobs.find((entry) => entry.job.id === jobId);
       if (!entry) throw new AuthorityError("JOB_NOT_FOUND", `Unknown job ${jobId}`);
       if ((!entry.job.enabled && !forced) || entry.job.terminated || entry.job.cancelled) throw new AuthorityError("JOB_DISABLED", `Job ${jobId} is disabled or terminated`);
@@ -106,6 +144,7 @@ export class AuthorityStore {
   start(fence: RunFence, at: string): AuthorityRun {
     requireTimestamp(at);
     return this.mutate((state) => {
+      this.requireAdmission();
       const run = this.currentRun(state, fence);
       if (run.state !== "claimed") throw new AuthorityError("INVALID_TRANSITION", "Only a claimed run can start");
       run.state = "started";

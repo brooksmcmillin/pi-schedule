@@ -1,7 +1,8 @@
 # Session-owned and background schedules
 
 See [dispatcher operation](DISPATCHER.md) before running this version. Legacy
-worker timers/installers are not dispatcher supervision and do not migrate jobs.
+worker timers are not dispatcher supervision. The installer now generates a
+dispatcher service; [migration and rollback](MIGRATION.md) are explicit commands.
 
 | Goal | Target | Where it runs |
 | --- | --- | --- |
@@ -55,8 +56,10 @@ guarantee exactly-once external side effects.
 
 The historical host footer fix is retained in
 [codex-limit-headless.patch](codex-limit-headless.patch); nonzero headless exits
-are still errors, never ignored. Deployment, migration/rollback tooling and live
-cutover are separate work. Before cutover, stop old schedulers and reload every
-open Pi process. Recreate/import only inspected jobs with explicit ownership and
-current authorization. Do not blindly replay old session continuations or run
+are still errors, never ignored. Use the [restartable migration/rollback
+procedure](MIGRATION.md) for inspected jobs with explicit ownership and current
+authorization. Drain/reload the identified affected schedulers when idle, not
+every unrelated Pi process. The receipt preserves original definitions/history;
+legacy paths are fenced before new admission activates. Live trebby cutover is a
+separate operator action. Do not blindly replay old session continuations or run
 both namespaces as if they were synchronized.

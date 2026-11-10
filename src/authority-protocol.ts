@@ -19,6 +19,8 @@ export const jobDefinitionSchema = Type.Omit(authorityJobSchema, [
   "lastRunAt", "nextRunAt", "runCount", "lastStatus", "lastError", "lastIdempotencyKey", "lastShell", "lastSuccessfulCompletionAt",
 ]);
 const requestSchema = Type.Union([
+  Type.Object({ op: Type.Literal("pause_admission"), reason: text }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("resume_admission") }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("create_job"), definition: jobDefinitionSchema }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("register_owner"), sessionId: text, cwd: text }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("receive"), owner: ownerSchema, idle: Type.Boolean() }, { additionalProperties: false }),

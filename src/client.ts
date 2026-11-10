@@ -1,4 +1,5 @@
 import { outcomeSummary } from "./outcome.js";
+import { BUILD_ID } from "./build.js";
 import { homedir } from "node:os";
 import { AuthorityClient } from "./authority-protocol.js";
 import { AuthorityStore } from "./authority-store.js";
@@ -13,7 +14,7 @@ export class SchedulerClient implements ScheduleToolStore {
   readonly control: AuthorityClient;
   status = "Dispatcher not checked";
   constructor(private readonly home: string = homedir()) {
-    this.control = new AuthorityClient(home, "dispatcher-client-v1");
+    this.control = new AuthorityClient(home, BUILD_ID);
   }
   pathsInfo() { return defaultPaths(this.home); }
 

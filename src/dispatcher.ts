@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { BUILD_ID, runtimeIdentity } from "./build.js";
+import { readMigration, receiptPath } from "./migration.js";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { createConnection } from "node:net";
@@ -40,6 +42,7 @@ export class Dispatcher {
   private readonly now: () => Date;
   private readonly id = randomUUID();
   private readonly owners = new Map<string, OwnerConnection>();
+  private readonly clients = new Map<string, { buildId: string; registeredAt: string; lastSeenAt: string }>();
   private readonly creates = new CreateRateLimiter();
   private readonly executions = new Set<Promise<void>>();
   private readonly execute: NonNullable<DispatcherOptions["execute"]>;
@@ -95,7 +98,7 @@ export class Dispatcher {
         if (run.state === "claimed") this.store.interrupt(fenceFor(run), "Restart before begin; previous dispatcher/connection cannot start", this.now().toISOString());
         else if (run.state === "started") this.store.markUnknown(fenceFor(run), this.now().toISOString());
       }
-      this.listener = await listenAuthority(this.store, this.home, (request) => this.request(request));
+      this.listener = await listenAuthority(this.store, this.home, (request, buildId) => this.request(request, buildId));
       this.timer = setInterval(() => {
         try { this.scan(); this.lastScanError = undefined; }
         catch (error) { this.lastScanError = String(error); console.error(`[pi-schedule] ${this.lastScanError}`); }
@@ -119,10 +122,28 @@ export class Dispatcher {
     this.store.close();
   }
 
-  request(request: AuthorityRequest): unknown {
+  request(request: AuthorityRequest, buildId = "unreported-direct-client"): unknown {
     if (this.stopping) throw new AuthorityError("STOPPING", "Dispatcher is stopping; inspect history before retrying");
     switch (request.op) {
-      case "snapshot": return { ...this.store.snapshot(), dispatcher: { id: this.id, error: this.lastScanError } };
+      case "snapshot": return { ...this.store.snapshot(), dispatcher: { id: this.id, error: this.lastScanError, maintenance: this.store.maintenance(), runtime: runtimeIdentity(),
+        clients: [...this.owners.entries()].map(([key, owner]) => ({ ...owner, ...this.clients.get(key), protocolVersion: runtimeIdentity().protocolVersion })) } };
+      case "pause_admission": {
+        if (existsSync(receiptPath(this.home)) && readMigration(this.home).phase !== "active") {
+          return { maintenance: this.store.maintenance(), note: "Migration/rollback already controls admission; finish its recorded stage" };
+        }
+        this.store.pause(request.reason);
+        for (const owner of this.owners.values()) this.releaseUnstarted(owner);
+        return { maintenance: this.store.maintenance(), runs: this.store.snapshot().runs.filter(active) };
+      }
+      case "resume_admission": {
+        const maintenance = this.store.maintenance();
+        if (existsSync(receiptPath(this.home)) && readMigration(this.home).phase !== "active") {
+          throw new AuthorityError("MIGRATION_INCOMPLETE", "Finish migration/rollback before resuming; legacy and new admission must not overlap");
+        }
+        if (maintenance && !["paused", "rollback", "active"].includes(maintenance.phase)) throw new AuthorityError("MIGRATION_INCOMPLETE", "Migration controls admission until it completes");
+        if (maintenance) this.store.pause(maintenance.id, "active");
+        return { maintenance: this.store.maintenance() };
+      }
       case "create_job": {
         const definition = request.definition;
         const count = this.store.snapshot().jobs.filter(({ job }) => !job.cancelled && job.scope === definition.scope &&
@@ -164,12 +185,14 @@ export class Dispatcher {
         const previous = this.owners.get(key);
         const owner = { sessionId: request.sessionId, cwd: request.cwd, generation: randomUUID() };
         this.owners.set(key, owner);
+        this.clients.set(key, { buildId, registeredAt: this.now().toISOString(), lastSeenAt: this.now().toISOString() });
         if (previous) this.releaseUnstarted(previous);
         return owner;
       }
       case "unregister_owner": {
         this.requireOwner(request.owner);
         this.owners.delete(ownerKey(request.owner));
+        this.clients.delete(ownerKey(request.owner));
         this.releaseUnstarted(request.owner);
         return { status: "closed" };
       }
@@ -201,6 +224,8 @@ export class Dispatcher {
         return this.finish(job, request.fence, request.outcome, { receipt: request.receipt, detail: "Executor stopped; effects reconciled explicitly" });
       }
       case "begin_delivery": {
+        const maintenance = this.store.maintenance();
+        if (maintenance && maintenance.phase !== "active") throw new AuthorityError("MAINTENANCE", "Admission paused; do not start an offered delivery");
         this.requireDelivery(request.owner, request.fence);
         return this.store.start(request.fence, this.now().toISOString());
       }
@@ -216,6 +241,8 @@ export class Dispatcher {
     if (this.owners.get(ownerKey(owner))?.generation !== owner.generation) {
       throw new AuthorityError("STALE_CONNECTION", "Owner connection changed or dispatcher restarted; register again");
     }
+    const client = this.clients.get(ownerKey(owner));
+    if (client) client.lastSeenAt = this.now().toISOString();
   }
 
   private requireDelivery(owner: OwnerConnection, fence: RunFence): AuthorityJob {
@@ -244,6 +271,8 @@ export class Dispatcher {
   }
 
   private prepare(job: AuthorityJob, ownerId: string): Delivery | undefined {
+    const maintenance = this.store.maintenance();
+    if (maintenance && maintenance.phase !== "active") return;
     const at = this.now();
     if (job.cancelled || (!job.enabled && !job.manualRequested) || job.terminated || (!job.manualRequested && Date.parse(job.nextRunAt) > at.getTime())) return;
     if (this.store.snapshot().runs.some((run) => run.jobId === job.id && active(run))) return;
@@ -259,7 +288,7 @@ export class Dispatcher {
     }
     const slotId = forced && Date.parse(job.nextRunAt) > at.getTime() ? `manual:${idempotencyKeyFor(job)}` : idempotencyKeyFor(job);
     try {
-      const run = this.store.claim(job.id, slotId, ownerId, "pi-schedule-0.3.6-receipts-v1", at.toISOString(), forced);
+      const run = this.store.claim(job.id, slotId, ownerId, BUILD_ID, at.toISOString(), forced);
       return { job, fence: fenceFor(run), forced };
     } catch (error) {
       if (error instanceof AuthorityError && ["CLAIM_BUSY", "SLOT_CONSUMED"].includes(error.code)) return;
