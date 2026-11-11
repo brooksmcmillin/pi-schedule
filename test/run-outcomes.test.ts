@@ -52,6 +52,35 @@ describe("run-bound application outcomes", () => {
     expect(f.store.snapshot().jobs[0]?.job.lastSuccessfulCompletionAt).toBe(["no_candidates", "escalated"].includes(application) ? at : undefined);
   });
 
+  it.each(["completed", "failed"] as const)("persists a run-bound pause on %s acknowledgement without terminating the job", (outcome) => {
+    const f = fixture(), run = f.begin();
+    const paused = { ...receipt(run.runId, "blocked_before_scan"), pauseAfterRun: true };
+    expect(() => f.store.updateJob("job", (job) => { job.enabled = false; })).toThrow(/active/);
+    expect(() => f.store.acknowledge({ ...run, generation: run.generation + 1 }, outcome, later, at,
+      undefined, undefined, { receipt: paused })).toThrow(/generation/);
+    expect(f.store.snapshot().jobs[0]?.job.enabled).toBe(true);
+    f.store.acknowledge(run, outcome, later, at, undefined, undefined, { receipt: paused });
+    const reopened = new AuthorityStore(f.home); stores.push(reopened);
+    expect(reopened.snapshot().jobs[0]?.job).toMatchObject({ enabled: false, runCount: 1, nextRunAt: later });
+    expect(reopened.snapshot().jobs[0]?.job.terminated).toBeUndefined();
+    expect(() => reopened.claim("job", later, "fixture", "test", later)).toThrow(/disabled/);
+    reopened.updateJob("job", (job) => { job.enabled = true; });
+    expect(reopened.claim("job", later, "fixture", "test", later).state).toBe("claimed");
+  });
+
+  it.each(["stale-run", "foreign-job", "malformed", "invalid-result", "omitted", "false"])("does not pause for %s receipts", (kind) => {
+    const f = fixture(), run = f.begin();
+    const value = { ...receipt(run.runId, "blocked_before_scan"), pauseAfterRun: true } as Record<string, unknown>;
+    if (kind === "stale-run") value.runId = "stale";
+    if (kind === "foreign-job") value.jobId = "foreign";
+    if (kind === "malformed") value.pauseAfterRun = "true";
+    if (kind === "omitted") delete value.pauseAfterRun;
+    if (kind === "false") value.pauseAfterRun = false;
+    f.store.acknowledge(run, "completed", later, at, undefined, undefined,
+      { receipt: value, receiptInvalid: kind === "invalid-result" });
+    expect(f.store.snapshot().jobs[0]?.job.enabled).toBe(true);
+  });
+
   it("advances failed slots without losing last successful completion or accepting an old generation", () => {
     const f = fixture(), first = f.begin();
     f.store.acknowledge(first, "completed", later, at, undefined, undefined, { receipt: receipt(first.runId) });

@@ -219,6 +219,8 @@ export class AuthorityStore {
       job.lastError = outcome === "failed" ? detail : undefined;
       job.lastShell = lastShell;
       job.manualRequested = false;
+      // Apply only a validated, run-bound request inside the acknowledgement fence.
+      if (!run.receiptInvalid && run.receipt?.pauseAfterRun) job.enabled = false;
       // Existing lastStatus is a legacy delivery summary, not application outcome.
       if (job.schedule.type === "once" || (job.maxRuns !== undefined && job.runCount >= job.maxRuns)) {
         job.enabled = false;

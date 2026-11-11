@@ -278,6 +278,19 @@ schedule action=create name="standup-prep"
 - **Stop noise:** `action=disable` pauses a job (keeps it); `action=cancel`
   removes it from active listings while retaining historical run references.
   Don't leave noisy jobs running.
+- **Pause from an active run:** ordinary disable/cancel rejects active executors.
+  Instead, call `schedule_outcome` as your final action with the current `runId`
+  and `jobId`, actual application/notification outcomes, and `pauseAfterRun=true`.
+  The dispatcher disables this job atomically at acknowledgement, preserving its
+  run history and fencing. The receipt records a request, not proof of a pause;
+  verify `enabled=false` in `schedule list` after settlement. Resume explicitly
+  with `schedule action=enable id=<id>` once the blocker is resolved.
+- **Authorization-blocked observers:** report the actionable blocker once, request
+  pause through the outcome receipt, and wait for human renewal/manual resume.
+  On unchanged blocked state, do not repeat the notice; record `notification=not_required`
+  if no new notification was needed. Notify again only when the blocker changes.
+  Do not bypass authorization or modify unrelated schedules. Ordinary future-slot
+  waits and transient failures a monitor should keep checking do not require a pause.
 
 ## Reference
 
