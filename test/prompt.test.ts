@@ -37,6 +37,10 @@ describe("buildFirePrompt", () => {
     expect(text).toContain("PRIVILEGE: read_only");
     expect(text).toContain("do NOT invent findings");
     expect(text).toContain("No findings");
+    expect(text).toContain("pauseAfterRun=true");
+    expect(text).toContain("only notify again when it changes");
+    expect(text).toContain("do not disable an active executor or bypass authorization");
+    expect(text).toContain("Do not pause for ordinary future-slot waits or transient failures");
   });
 
   it("labels force-run source", () => {
@@ -99,6 +103,10 @@ describe("buildShellFollowUpPrompt", () => {
     expect(text).toContain("npm test");
     expect(text).toContain("FAIL auth");
     expect(text).toContain("Fix the failing tests.");
+    expect(text).toContain("pauseAfterRun=true");
+    expect(text).toContain("only notify again when it changes");
+    expect(text).toContain("do not disable an active executor or bypass authorization");
+    expect(text).toContain("Do not pause for ordinary future-slot waits or transient failures");
     expect(text).toContain("PRIVILEGE: mutate");
   });
 });

@@ -4,6 +4,7 @@ import { Value } from "typebox/value";
 /** Only bounded classifications enter general history; reports and credentials stay private. */
 export const applicationReceiptSchema = Type.Object({
   version: Type.Literal(1),
+  pauseAfterRun: Type.Optional(Type.Boolean({ description: "Disable this job's automatic schedule when this run is acknowledged; resume explicitly with schedule enable." })),
   runId: Type.String({ minLength: 1 }),
   jobId: Type.String({ minLength: 1 }),
   application: Type.Union([

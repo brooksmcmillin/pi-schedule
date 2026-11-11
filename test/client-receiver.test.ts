@@ -93,6 +93,33 @@ describe("dispatcher clients and owner receiver", () => {
     expect(f.dispatcher.store.snapshot().jobs[0]?.job.lastSuccessfulCompletionAt).toBeUndefined();
   });
 
+  it("pauses a recurring blocked observer at settlement and prevents later wakes until enabled", async () => {
+    const f = await fixture(); const job = await f.create();
+    f.dispatcher.store.updateJob(job.id, (value) => {
+      value.schedule = { type: "interval", everyMs: 60000, every: "1m" };
+    });
+    const owner = f.receiver();
+    await owner.instance.poll(owner.ctx);
+    const run = f.dispatcher.store.snapshot().runs[0]!;
+    await expect(f.client.setEnabled(job.id, "/workspace", false)).rejects.toThrow(/active/);
+    const receipt = { version: 1, runId: run.runId, jobId: job.id,
+      application: "blocked_before_scan", notification: "sent", pauseAfterRun: true };
+    await owner.tools.get("schedule_outcome").execute("pause", receipt, undefined, undefined, owner.ctx);
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job.enabled).toBe(true);
+    await owner.settle();
+    expect(f.dispatcher.store.snapshot().jobs[0]?.job).toMatchObject({ enabled: false, runCount: 1 });
+    expect(f.dispatcher.store.snapshot().runs[0]).toMatchObject({ state: "completed", receipt });
+    // Make the next slot overdue without enabling it: repeated polling must remain quiet.
+    f.dispatcher.store.updateJob(job.id, (value) => { value.nextRunAt = at.toISOString(); });
+    for (let i = 0; i < 12; i++) await owner.instance.poll(owner.ctx);
+    expect(owner.sendUserMessage).toHaveBeenCalledOnce();
+    expect(f.dispatcher.store.snapshot().runs).toHaveLength(1);
+    await f.client.setEnabled(job.id, "/workspace", true);
+    await owner.instance.poll(owner.ctx);
+    expect(owner.sendUserMessage).toHaveBeenCalledTimes(2);
+    await owner.settle();
+  });
+
   it("retains a succeeded receipt but records failed execution and no successful completion after abort", async () => {
     const f = await fixture(); const job = await f.create(); const owner = f.receiver();
     await owner.instance.poll(owner.ctx);
