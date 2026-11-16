@@ -32,7 +32,7 @@ export class OwnerReceiver {
         throw new Error("Outcome does not belong to the current scheduled run/session");
       }
       pending.receipt = receipt;
-    });
+    }, true);
     this.pi.on("before_agent_start", (event) => {
       const pending = this.pending;
       if (!pending) return;
