@@ -278,6 +278,11 @@ schedule action=create name="standup-prep"
 - **Stop noise:** `action=disable` pauses a job (keeps it); `action=cancel`
   removes it from active listings while retaining historical run references.
   Don't leave noisy jobs running.
+- **Visible owner closeout:** `schedule_outcome` ends the turn. Include a sanitized
+  `handoff={summary,blocker,nextAction}` (use `blocker="none"` when appropriate).
+  Its visible tool result is the final chat handoff; do not assume a later reply.
+  `notification=sent` means external delivery, not a chat reply. Background reports
+  stay private; do not copy them into handoffs. See [outcome examples](../../docs/OUTCOMES.md#visible-owner-session-closeout).
 - **Pause from an active run:** ordinary disable/cancel rejects active executors.
   Instead, call `schedule_outcome` as your final action with the current `runId`
   and `jobId`, actual application/notification outcomes, and `pauseAfterRun=true`.

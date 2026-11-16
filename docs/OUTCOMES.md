@@ -43,6 +43,30 @@ an application receipt was recorded earlier. Session replacement/reload loses
 that executor association and leaves execution unknown, not completed. This path
 requires a host supporting `agent_settled`; no early-handoff fallback exists.
 
+### Visible owner-session closeout
+
+`schedule_outcome` terminates the turn: do not plan a reply after calling it.
+For owner-session work, include a bounded, sanitized `handoff` alongside the receipt:
+
+```json
+{"version":1,"runId":"<current run UUID>","jobId":"<current job ID>","application":"partial","notification":"sent","handoff":{"summary":"Two fixture checks passed; one remains.","blocker":"Required fixture input is missing.","nextAction":"Supply the input, then finish the remaining check."}}
+```
+
+The tool renders the reported application outcome, work summary, blocker and next
+action in its normal visible result before terminating. `notification=sent`
+means an external notification, **not a chat reply**. A successful application
+with a failed notification remains `application=succeeded, notification=failed`;
+name the notification failure and the actual next action in the handoff. For
+successful work with nothing pending, use `blocker="none"` and
+`nextAction="No further action"`. An omitted handoff is visibly reported as
+not provided, never inferred as success or absence of a blocker.
+
+Only the strict receipt enters general scheduler history. Handoff text stays in
+the owner session's tool-result transcript; it is not an independent certification
+or proof of later dispatcher acknowledgement. Background tools keep their bounded
+receipt-only output and discard any supplied handoff rather than copying private
+report contents into output/history. Keep detailed reports in private artifacts.
+
 ## Cadence and last success
 
 `nextRunAt` advances from terminal attempt time using the existing interval/daily
@@ -83,6 +107,14 @@ continues reading old run rows (with protocol v1 provenance) without inventing n
 evidence. No live migration, installation or policy change is performed here.
 
 ## Focused verification and limits
+
+`outcome-visibility.test.ts` composes the real owner receiver/socket/store, Pi SDK
+session, terminating tool, persisted transcript and default collapsed tool renderer
+(at narrow and normal widths). A scripted model covers partial, blocked, successful
+and notification-failure handoffs without another model request. It also exercises
+the background worker guard's private receipt path. These unpaid fixtures prove
+local message/rendering behavior, not live owner delivery or model compliance on
+every run.
 
 `run-outcomes.test.ts` covers receipt binding, invalid/missing receipts, independent
 outcomes and cadence. `client-receiver.test.ts` composes sockets, store and owner
