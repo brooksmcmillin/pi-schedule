@@ -78,7 +78,7 @@ Ambiguous started executions after restart require reconciliation, not replay.
 
 ```
 schedule
-  action: create | list | cancel | enable | disable | run_now | history
+  action: create | update | list | cancel | enable | disable | run_now | history
   name          (create) short label
   kind          (create) prompt | shell | notify | message   (default prompt)
   prompt        (create) task/reminder text; optional shell follow-up
@@ -101,6 +101,20 @@ schedule
 **Interval rules:** min `1m`, max `90d`; `once` allows seconds (`30s`) up to `90d`.
 **Always `list` before `create`** to avoid duplicate jobs (no auto-dedup).
 **Terminated jobs** (once fired / maxRuns reached) are disabled and skipped by due scans; re-enable clears the flag, or cancel + recreate.
+
+## Update a job without replacing it
+
+Use `schedule action=update id=<id> prompt="<new text>"` to change only the
+prompt. List/inspect the existing job first and retain its old prompt for rollback.
+Do not include creation fields: update accepts only `id` and nonempty `prompt`.
+It preserves cadence/next slot, disabled or terminal state, lifetime budget,
+run history, target, owner, workspace and privilege tier. It does not enable or
+run the job. Shell commands and explicit success/failure overrides are unchanged.
+
+Active or ambiguous executions reject edits: inspect/reconcile history first,
+never clear reservations or replace identities to bypass the fence. Upgrade and
+restart the dispatcher and reload clients if update is unavailable; do not edit
+the authority database. Roll back with the same action and saved old text.
 
 ## Decisions
 

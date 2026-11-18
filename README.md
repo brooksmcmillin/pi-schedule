@@ -51,7 +51,7 @@ replacing—not supplementing—the upstream package entry.
 
 | Piece | Behavior |
 |-------|----------|
-| **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history |
+| **Tool** | `schedule` — create / update / list / cancel / enable / disable / run_now / history |
 | **Kinds** | `prompt` (default) · `shell` · `notify` · `message` — what fires when due |
 | **Storage** | Private `~/.pi-schedule-authority/v1/authority.sqlite`; global/project scope is metadata |
 | **Syntax** | Intervals (`30m`, `2h`, `1d`) and daily wall-clock (`09:00`) |
@@ -83,7 +83,7 @@ The tool is self-describing for mechanics; the skill owns the patterns.
 
 ```text
 schedule
-  action: create | list | cancel | enable | disable | run_now | history
+  action: create | update | list | cancel | enable | disable | run_now | history
   name?:          short label (create)
   kind?:          prompt | shell | notify | message   (default prompt)
   prompt?:        task / reminder text; shell follow-up instruction
@@ -103,6 +103,27 @@ schedule
   id?:            job id
   limit?:         history row count
 ```
+
+### Update an existing prompt
+
+```text
+schedule action=update id=<job-id> prompt="Read the current reporting workflow and produce its bounded report."
+```
+
+Update accepts only `id` and a nonempty `prompt`. It changes the stored prompt
+and update timestamp through the dispatcher, preserving the job ID, target,
+owner, workspace, kind, privilege tier, cadence, next slot, enabled/terminated
+state, run budget, counters and history. Disabled jobs stay disabled; exhausted
+jobs are not rearmed. The new prompt is used at the next dispatch. For shell
+jobs this changes only the generic follow-up prompt, not the command or explicit
+`successPrompt`/`failurePrompt` overrides.
+
+An active or ambiguous executor blocks editing; inspect history and reconcile
+it through the existing procedure rather than clearing a reservation. Project
+visibility and maintenance admission checks still apply. Save the old prompt
+before changing it; rollback uses the same `update` action with that text.
+Upgrade/restart the dispatcher and reload clients before use: older dispatchers
+reject the new operation, and offline clients never write authority state.
 
 ### Job kinds
 

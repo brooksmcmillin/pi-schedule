@@ -64,6 +64,9 @@ export class SchedulerClient implements ScheduleToolStore {
   async setEnabled(id: string, cwd: string, enabled: boolean) {
     return await this.control.request({ op: "edit_job", jobId: id, cwd, action: enabled ? "enable" : "disable" }) as AuthorityJob;
   }
+  async updatePrompt(id: string, cwd: string, prompt: string) {
+    return await this.control.request({ op: "update_prompt", jobId: id, cwd, prompt }) as AuthorityJob;
+  }
   async runNow(id: string, cwd: string, requesterSessionId?: string) {
     // Never use an offline snapshot to authorize execution: the dispatcher rechecks
     // the captured slot, current enabled state and durable claim in one handler.

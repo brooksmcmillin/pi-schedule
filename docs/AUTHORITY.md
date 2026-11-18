@@ -67,13 +67,20 @@ incompatible clients get actionable upgrade/reload errors without mutations.
 
 The foundation listener supports `snapshot`, `add_job`, `claim`, `start`,
 `interrupt` and `acknowledge`. The production dispatcher rejects those low-level
-mutation operations; clients use `create_job`, `edit_job`, `run_now`, `scan`,
+mutation operations; clients use `create_job`, `edit_job`, `update_prompt`, `run_now`, `scan`,
 `register_owner`, `receive`, `begin_delivery`, `defer_delivery`,
 `handoff_delivery`, `finish_delivery`, `reconcile_execution`, and `unregister_owner` (see `AuthorityRequest`). Every transition carries a full
 fence; claim build identity comes from the validated envelope. Responses carry
 matching version/request identity and either `{ok:true,result}` or
 `{ok:false,error:{code,message}}`. This is a cooperating same-user interface,
 not an authorization boundary between local clients.
+
+`update_prompt` accepts only `jobId`, `cwd` and nonempty `prompt`. The dispatcher
+checks visibility and atomically changes only prompt/update timestamp using the
+existing active-executor and maintenance fences. Identity, cadence, budget,
+ownership and run receipts are not rewritten. This is an additive protocol-v2
+operation; older dispatchers reject it before mutation. Restart an upgraded
+dispatcher and reload clients before using `schedule action=update`.
 
 An existing listener is never unlinked/taken over. An absent/broken authority
 returns startup/reload guidance, not legacy execution. Transport failure can

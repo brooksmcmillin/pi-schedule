@@ -31,6 +31,7 @@ const requestSchema = Type.Union([
   Type.Object({ op: Type.Literal("defer_delivery"), owner: ownerSchema, fence: fenceSchema }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("finish_delivery"), owner: ownerSchema, fence: fenceSchema, outcome: Type.Union([Type.Literal("completed"), Type.Literal("failed")]), detail: Type.String(), lastShell: Type.Optional(authorityJobSchema.properties.lastShell), receipt: Type.Optional(applicationReceiptSchema) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("edit_job"), jobId: text, cwd: text, action: Type.Union([Type.Literal("cancel"), Type.Literal("enable"), Type.Literal("disable")]) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("update_prompt"), jobId: text, cwd: text, prompt: text }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("run_now"), jobId: text, cwd: text, nextRunAt: text, requesterSessionId: Type.Optional(text) }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("scan") }, { additionalProperties: false }),
   Type.Object({ op: Type.Literal("snapshot") }, { additionalProperties: false }),

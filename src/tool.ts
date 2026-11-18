@@ -1,7 +1,7 @@
 /**
  * Agent-facing `schedule` tool.
  *
- * Actions: create | list | cancel | enable | disable | run_now | history
+ * Actions: create | update | list | cancel | enable | disable | run_now | history
  * Job kinds (create.kind): prompt | shell | notify | message
  */
 
@@ -46,6 +46,7 @@ export interface ScheduleToolStore {
   remove(id: string, cwd: string): ScheduledJob | undefined | Promise<ScheduledJob | undefined>;
   setEnabled(id: string, cwd: string, enabled: boolean): ScheduledJob | undefined | Promise<ScheduledJob | undefined>;
   pathsInfo(): ReturnType<ScheduleStore["pathsInfo"]>;
+  updatePrompt?(id: string, cwd: string, prompt: string): Promise<ScheduledJob>;
   runNow?(id: string, cwd: string, requesterSessionId?: string): Promise<unknown>;
   history?(id?: string, limit?: number): Promise<unknown>;
 }
@@ -53,6 +54,7 @@ export interface ScheduleToolStore {
 const ScheduleParams = Type.Object({
   action: StringEnum([
     "create",
+    "update",
     "list",
     "cancel",
     "enable",
@@ -192,7 +194,8 @@ export function registerScheduleTool(
     label: "Schedule",
     description:
       "Manage scheduled agent tasks and actions (reviews, polls, shell checks, reminders). " +
-      "Actions: create, list, cancel, enable, disable, run_now, history. " +
+      "Actions: create, update, list, cancel, enable, disable, run_now, history. " +
+      "Update accepts only id and nonempty prompt; preserves cadence, budget, ownership and history. " +
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
       "Default target=session: follow-ups and keepalives run only in the creating session, never another chat. " +
@@ -208,6 +211,8 @@ export function registerScheduleTool(
         switch (params.action) {
           case "create":
             return await handleCreate(store, params, cwd, ctx);
+          case "update":
+            return await handleUpdate(store, params, cwd);
           case "list":
             return await handleList(store, cwd);
           case "cancel":
@@ -341,6 +346,27 @@ async function handleCreate(
     ].join("\n"),
     { job },
   );
+}
+
+async function handleUpdate(
+  store: ScheduleToolStore,
+  params: { id?: string; prompt?: string },
+  cwd: string,
+) {
+  if (Object.keys(params).some((key) => !["action", "id", "prompt"].includes(key))) {
+    return textResult("Error: update accepts only id and prompt; other job fields cannot be changed.", { error: "unsupported_update_fields" });
+  }
+  if (!params.id?.trim()) {
+    return textResult('Error: "id" is required for update', { error: "id_required" });
+  }
+  if (!params.prompt?.trim()) {
+    return textResult('Error: nonempty "prompt" is required for update', { error: "prompt_required" });
+  }
+  if (!store.updatePrompt) {
+    return textResult("Error: prompt updates require an updated dispatcher/client; upgrade and reload pi-schedule. No local fallback.", { error: "update_unavailable" });
+  }
+  const job = await store.updatePrompt(params.id.trim(), cwd, params.prompt);
+  return textResult(`Updated prompt for job ${job.id} "${job.name}". Schedule and run history unchanged.`, { job });
 }
 
 async function handleList(store: ScheduleToolStore, cwd: string) {

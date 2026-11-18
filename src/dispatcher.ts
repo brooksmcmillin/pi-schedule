@@ -11,7 +11,7 @@ import { listenAuthority, type AuthorityRequest } from "./authority-protocol.js"
 import { AuthorityStore, authorityPaths } from "./authority-store.js";
 import { ExecutionFailure, type ExecutionResult } from "./outcome.js";
 import { healthPath, writePrivateJson } from "./watchdog-health.js";
-import { AuthorityError, type AuthorityJob, type AuthorityRun, type RunFence } from "./authority-types.js";
+import { AuthorityError, requireText, type AuthorityJob, type AuthorityRun, type RunFence } from "./authority-types.js";
 import { CreateRateLimiter, decideDue, idempotencyKeyFor, LIMITS, nextAfter } from "./policy.js";
 import { ScheduleRunner, TICK_MS } from "./runner.js";
 import { routingError } from "./routing.js";
@@ -163,6 +163,14 @@ export class Dispatcher {
           if (job.enabled) job.terminated = null;
           else job.manualRequested = false;
           if (request.action === "cancel") job.cancelled = true;
+          job.updatedAt = this.now().toISOString();
+        });
+      }
+      case "update_prompt": {
+        this.getVisible(request.jobId, request.cwd);
+        requireText(request.prompt, "prompt");
+        return this.store.updateJob(request.jobId, (job) => {
+          job.prompt = request.prompt;
           job.updatedAt = this.now().toISOString();
         });
       }
