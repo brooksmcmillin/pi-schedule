@@ -7,6 +7,7 @@
 
 import { formatSchedule } from "./schedule.js";
 import { tierContract } from "./policy.js";
+import { pauseGuidance } from "./outcome.js";
 import type {
   FireSource,
   PrivilegeTier,
@@ -131,7 +132,7 @@ function outcomeContract(runId: string, jobId: string, ownerSession: boolean): s
   const handoff = ownerSession
     ? " Include handoff={summary,blocker,nextAction}: a concise sanitized work summary, the actual blocker (or 'none'), and next action. This is displayed in chat at the terminating tool boundary; do not assume a later assistant reply. External notification=sent is not a chat reply."
     : " Background reports stay private; do not copy them into a handoff or chat.";
-  return `\n## Outcome receipt\nAs your final action, call schedule_outcome with version=1, runId=${JSON.stringify(runId)}, jobId=${JSON.stringify(jobId)}, application=succeeded|no_candidates|escalated|blocked_before_scan|partial|failed and notification=sent|not_required|failed|unverified. Report actual work and notification results separately.${handoff} Missing receipt remains outcome-unverified; never invent success. Do not include private report contents or credentials. If progress requires human authorization or intervention, report the blocker once (only notify again when it changes) and set pauseAfterRun=true in this receipt. This pauses only this job at acknowledgement; do not disable an active executor or bypass authorization. Do not pause for ordinary future-slot waits or transient failures that this monitor should keep checking.`;
+  return `\n## Outcome receipt\nAs your final action, call schedule_outcome with version=1, runId=${JSON.stringify(runId)}, jobId=${JSON.stringify(jobId)}, application=succeeded|no_candidates|escalated|blocked_before_scan|partial|failed and notification=sent|not_required|failed|unverified. Report actual work and notification results separately.${handoff} Missing receipt remains outcome-unverified; never invent success. Do not include private report contents or credentials. ${pauseGuidance} Report a job-wide blocker once (only notify again when it changes). This pauses only this job at acknowledgement; do not disable an active executor or bypass authorization. Do not pause for ordinary future-slot waits or transient failures that this monitor should keep checking.`;
 }
 
 /** Compact notify / list label for a job. */

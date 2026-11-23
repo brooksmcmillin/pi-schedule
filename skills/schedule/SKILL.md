@@ -304,8 +304,10 @@ schedule action=create name="standup-prep"
   run history and fencing. The receipt records a request, not proof of a pause;
   verify `enabled=false` in `schedule list` after settlement. Resume explicitly
   with `schedule action=enable id=<id>` once the blocker is resolved.
-- **Authorization-blocked observers:** report the actionable blocker once, request
-  pause through the outcome receipt, and wait for human renewal/manual resume.
+- **Authorization-blocked observers:** request a pause only when the entire job
+  cannot make useful progress in future runs without human intervention. Report
+  that blocker once and wait for human renewal/manual resume. Escalate blocked
+  individual items without pausing; keep scanning even if all current items are blocked.
   On unchanged blocked state, do not repeat the notice; record `notification=not_required`
   if no new notification was needed. Notify again only when the blocker changes.
   Do not bypass authorization or modify unrelated schedules. Ordinary future-slot
