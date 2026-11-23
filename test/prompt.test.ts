@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
+import { registerOutcomeTool } from "../src/outcome-tool.js";
 import { buildFirePrompt, buildShellFollowUpPrompt } from "../src/prompt.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { ScheduledJob, ShellRunResult } from "../src/types.js";
@@ -22,6 +24,19 @@ const base: ScheduledJob = {
   lastStatus: null,
 };
 
+const jobWidePause = /pauseAfterRun=true only when .*job as a whole.*future runs without human authorization or intervention/;
+const individualEscalations = /Escalating individual items is not a reason to pause.*every item.*keep scanning/;
+
+it("gives the outcome tool the same pause boundary as the scheduled prompt", () => {
+  const registerTool = vi.fn<ExtensionAPI["registerTool"]>();
+  registerOutcomeTool({ registerTool } as unknown as ExtensionAPI, () => {});
+  expect(registerTool).toHaveBeenCalledWith(expect.objectContaining({
+    name: "schedule_outcome",
+    description: expect.stringMatching(jobWidePause),
+  }));
+  expect(registerTool.mock.calls[0]?.[0].description).toMatch(individualEscalations);
+});
+
 describe("buildFirePrompt", () => {
   it("includes isolation contract and privilege", () => {
     const text = buildFirePrompt({
@@ -37,7 +52,8 @@ describe("buildFirePrompt", () => {
     expect(text).toContain("PRIVILEGE: read_only");
     expect(text).toContain("do NOT invent findings");
     expect(text).toContain("No findings");
-    expect(text).toContain("pauseAfterRun=true");
+    expect(text).toMatch(jobWidePause);
+    expect(text).toMatch(individualEscalations);
     expect(text).toContain("only notify again when it changes");
     expect(text).toContain("do not disable an active executor or bypass authorization");
     expect(text).toContain("Do not pause for ordinary future-slot waits or transient failures");
@@ -103,7 +119,7 @@ describe("buildShellFollowUpPrompt", () => {
     expect(text).toContain("npm test");
     expect(text).toContain("FAIL auth");
     expect(text).toContain("Fix the failing tests.");
-    expect(text).toContain("pauseAfterRun=true");
+    expect(text).toMatch(jobWidePause);
     expect(text).toContain("only notify again when it changes");
     expect(text).toContain("do not disable an active executor or bypass authorization");
     expect(text).toContain("Do not pause for ordinary future-slot waits or transient failures");

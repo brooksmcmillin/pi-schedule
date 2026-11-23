@@ -1,6 +1,8 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
+export const pauseGuidance = "Set pauseAfterRun=true only when the job as a whole cannot make further useful progress in future runs without human authorization or intervention. Escalating individual items is not a reason to pause, even if every item in the current batch needs human action: keep scanning for new or changed items.";
+
 /** Only bounded classifications enter general history; reports and credentials stay private. */
 export const applicationReceiptSchema = Type.Object({
   version: Type.Literal(1),

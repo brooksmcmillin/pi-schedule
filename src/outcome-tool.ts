@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { applicationReceiptSchema, type ApplicationReceipt } from "./outcome.js";
+import { applicationReceiptSchema, pauseGuidance, type ApplicationReceipt } from "./outcome.js";
 
 const outcomeToolSchema = Type.Object({
   ...applicationReceiptSchema.properties,
@@ -16,7 +16,7 @@ export function registerOutcomeTool(pi: ExtensionAPI,
   ownerSession = false): void {
   pi.registerTool({
     name: "schedule_outcome", label: "Schedule outcome",
-    description: "Record the current scheduled run's application and notification outcomes and end this turn. For owner-session work, supply a concise sanitized handoff (summary, blocker or 'none', nextAction). It is displayed at this tool boundary; no later reply is assumed. Set pauseAfterRun=true to pause this job at acknowledgement when human authorization or intervention is required. Not a certification of model judgments. Do not include private reports, credentials or repository contents.",
+    description: `Record the current scheduled run's application and notification outcomes and end this turn. For owner-session work, supply a concise sanitized handoff (summary, blocker or 'none', nextAction). It is displayed at this tool boundary; no later reply is assumed. ${pauseGuidance} The pause takes effect at acknowledgement. Not a certification of model judgments. Do not include private reports, credentials or repository contents.`,
     parameters: outcomeToolSchema,
     async execute(_id, { handoff, ...receipt }, _signal, _update, ctx) {
       save(receipt, ctx);
